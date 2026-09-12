@@ -2,7 +2,9 @@
 
 ESP32-S3 星智 CUBE 1.54 吋獨立鬧鐘。班表與響鈴設定保存在裝置；手機在裝置網頁編輯月曆，也可經裝置的原生 Tailscale 上傳圖片至私有辨識服務。
 
-目前新版韌體位於 `firmware-next/`（0.2.8 候選版），後端版本為 0.1.0。**候選版的建置成功不等於實機驗收完成**；原生 Tailscale 完整辨識流程與實機 OTA 的最終結果仍待確認。先前同區網路徑的辨識成功，不算 Tailscale 驗收。
+新版韌體位於 `firmware-next/`，原始碼及私有發布映像為 **0.3.1**，裝置目前運作在 **0.3.0**；依使用者要求停止遠端安裝測試，0.3.1 只上傳、不安裝。後端版本為 0.1.0。
+
+0.2.8 已實測手機經 ESP32 與原生 Tailscale 上傳九月班表，36.851 秒辨識出正確 11 天。升至 0.3.0 後網路、90 度方向、11 筆鬧鐘與班表 revision 保留。0.2.9 的首次 OTA 下載中止且保留原版本；0.3.0 已加入十分鐘總期限、三十秒無進度保護與進度回報。0.3.1 的安裝前健康檢查曾回應 503，未啟動安裝，不能宣稱完整 OTA 已驗證。
 
 ## 第一次使用與換網路
 
@@ -65,4 +67,4 @@ node --check static/app.js
 
 `provisioning.h`、`.env`、節點身分、Flash 備份及帶憑證映像均為私密檔案，不提交 Git，也不放公開 Releases。CI 使用無裝置憑證的建置；實際部署憑證只在受控環境注入。
 
-GitHub 儲存庫：[chuangkevin/shift-alarm](https://github.com/chuangkevin/shift-alarm)，首次推送與 Actions 執行結果尚待完成。現有主機曾以來源檔部署；`deploy/update.sh` 須在主機改為正確 Git clone 並設定遠端後才適用。
+GitHub 儲存庫：[chuangkevin/shift-alarm](https://github.com/chuangkevin/shift-alarm)，已使用 SSH 推送；Actions 狀態以儲存庫最新 run 為準。現有主機曾以來源檔部署；`deploy/update.sh` 須在主機改為正確 Git clone 並設定遠端後才適用。
