@@ -10,6 +10,7 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements.txt
       - run: python -m pytest -q
+      - run: python -m unittest discover -s deploy/tests -v
       - run: node --check static/app.js
       - run: docker build -t shift-alarm:check .
   firmware:
