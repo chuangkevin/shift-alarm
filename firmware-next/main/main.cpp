@@ -150,7 +150,11 @@ void draw() {
     line(8,62,next==INT64_MAX?"目前沒有鬧鐘":String("下次：")+datetime(next));
     line(8,81,next==INT64_MAX?"請設定班表與時間":"上班鬧鐘");
   }
-  String qrText=portal?(showJoinQr?String("WIFI:T:WPA;S:")+apName+";P:"+apPassword+";;":"http://192.168.4.1"):String("http://")+WiFi.localIP().toString()+"/";
+  const bool pairingScreen=portal&&!(WiFi.isConnected()&&apCloseAt);
+  // Keep the readable LAN address above the QR quiet zone (starts at y=122).
+  if(WiFi.isConnected())line(8,103,String("http://")+WiFi.localIP().toString()+"/display");
+  else line(8,103,pairingScreen?"http://192.168.4.1/":"無線網路未連線");
+  String qrText=pairingScreen?(showJoinQr?String("WIFI:T:WPA;S:")+apName+";P:"+apPassword+";;":"http://192.168.4.1"):(WiFi.isConnected()?String("http://")+WiFi.localIP().toString()+"/display":String());
   if(qrText.length()&&qrText.length()<=180) {
     uint8_t data[qrcode_getBufferSize(8)]; QRCode qr;
     if(qrcode_initText(&qr,data,8,ECC_LOW,qrText.c_str())==0) {
@@ -159,8 +163,8 @@ void draw() {
       for(int row=0;row<qr.size;row++)for(int col=0;col<qr.size;col++)if(qrcode_getModule(&qr,col,row))surface.fillRect(x+col*scale,y+row*scale,scale,scale,0);
     }
   }
-  if(portal) { line(115,130,showJoinQr?"①掃碼加入熱點":"②掃碼設定網路"); line(115,145,apName.substring(0,19)); line(115,160,"熱點密碼："); line(115,174,apPassword);line(115,190,"＋：切換條碼");line(115,204,connecting?"連線中…":setupFailed?"請重試連線":"192.168.4.1"); }
-  else { line(115,133,WiFi.isConnected()?"無線網路已連線":"無線網路未連線"); line(115,151,"掃碼管理鬧鐘"); line(115,169,String(alarms.size())+" 個鬧鐘"); line(115,187,syncState=="班表已同步"?"班表已同步":"等待班表同步");alarm_tailnet_status_t ts={};alarm_tailnet_get_status(&ts);line(115,204,tailnetLabel(ts.state)); }
+  if(pairingScreen) { line(115,130,showJoinQr?"①掃碼加入熱點":"②掃碼設定網路"); line(115,145,apName.substring(0,19)); line(115,160,"熱點密碼："); line(115,174,apPassword);line(115,190,"＋：切換條碼");line(115,204,connecting?"連線中…":setupFailed?"請重試連線":"192.168.4.1"); }
+  else { line(115,133,WiFi.isConnected()?"無線網路已連線":"無線網路未連線"); line(115,151,"掃碼設定裝置"); line(115,169,String(alarms.size())+" 個鬧鐘"); line(115,187,syncState=="班表已同步"?"班表已同步":"等待班表同步");alarm_tailnet_status_t ts={};alarm_tailnet_get_status(&ts);line(115,204,tailnetLabel(ts.state)); }
   line(115,219,pairingHoldActive?"放開即取消配網":ringing?"響鈴時任意鍵停止":"換網路按＋－十秒");
   // Compose off-screen: never clear the visible TFT between text and QR draws.
   uint16_t *pixels=frame->getBuffer(); uint32_t hash=2166136261u;
@@ -369,7 +373,7 @@ void routes() {
   server.on("/",HTTP_GET,[]{
     if(!portal){
       alarm_tailnet_status_t t={};alarm_tailnet_get_status(&t);
-      String page=String("<h1>裝置管理</h1><p>")+tailnetLabel(t.state)+"</p>";
+      String page=String("<h1>裝置管理</h1><p>本地設定網址：<a href='/'>http://")+WiFi.localIP().toString()+"/</a></p><p>"+tailnetLabel(t.state)+"</p>";
       if(t.state==ALARM_TAILNET_CONNECTED)page+="<a class='primary-link' href='http://"+WiFi.localIP().toString()+":8080'>管理班表與鬧鐘</a>";
       else page+="<p>先完成私人網路登入授權，裝置才能連上班表辨識服務。手機只需連上此區網。</p><a class='primary-link' href='/tailnet'>設定私人網路</a>";
       page+="<h2>裝置設定</h2><p>調整螢幕方向、更換無線網路，或檢查更新。</p><a href='/display'>開啟裝置設定</a><p class='help'>同時按住「＋」與「－」十秒，也能重新配網。</p>";
