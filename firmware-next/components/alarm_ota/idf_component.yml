@@ -1,0 +1,4 @@
+version: "0.1.0"
+description: "Authenticated inactive-slot OTA with alarm-aware activation and pending-image self-test"
+dependencies:
+  idf: ">=5.3.0,<5.4.0"

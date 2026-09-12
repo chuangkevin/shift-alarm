@@ -1,0 +1,11 @@
+{
+  "test_key": "test-only-device-token-32-characters",
+  "manifest": {
+    "board": "xingzhi-cube-1.54tft-wifi",
+    "version": "1.2.3",
+    "size": 1024,
+    "sha256": "785b0751fc2c53dc14a4ce3d800e69ef9ce1009eb327ccf458afe09c242c26c9",
+    "hmac_sha256": "9311974c5f5ecfc60262acd0cc925b0b71add0700b8b833b6b4d113091611e0a"
+  },
+  "canonical": "xingzhi-cube-1.54tft-wifi\n1.2.3\n1024\n785b0751fc2c53dc14a4ce3d800e69ef9ce1009eb327ccf458afe09c242c26c9\n"
+}
