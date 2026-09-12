@@ -22,6 +22,16 @@ static void publish(void) {
         xSemaphoreTake(client->security.lock,portMAX_DELAY);
         memcpy(next.auth_url,client->security.auth_url,sizeof(next.auth_url));
         next.acl_ready=client->security.ready&&client->security.peers_ready&&client->security.authorized;
+        next.coord_stage=client->security.coord_stage;
+        next.coord_last_reason=client->security.coord_last_reason;
+        next.coord_reconnects=client->security.coord_reconnects;
+        next.coord_successes=client->security.coord_successes;
+        next.coord_stage_since_ms=client->security.coord_stage_since_ms;
+        next.coord_last_failure_ms=client->security.coord_last_failure_ms;
+        next.peer_generation=client->security.peer_generation;
+        next.policy_ready=client->security.ready;
+        next.peers_ready=client->security.peers_ready;
+        next.node_authorized=client->security.authorized;
         next.peer_count=client->security.observed_peer_count;
         next.peer_capacity=ML_POLICY_MAX_PEERS;
         next.capacity_exceeded=client->security.capacity_exceeded;

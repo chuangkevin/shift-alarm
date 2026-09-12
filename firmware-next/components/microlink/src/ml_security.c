@@ -216,3 +216,20 @@ done:
     if(!allowed){if(outbound)ml->security.wg_out_dropped++;else ml->security.wg_in_dropped++;}
     xSemaphoreGive(ml->security.lock);return allowed;
 }
+
+void ml_coord_diag_stage(microlink_t *ml,unsigned stage) {
+    xSemaphoreTake(ml->security.lock,portMAX_DELAY);
+    if(ml->security.coord_stage!=stage){ml->security.coord_stage=stage;ml->security.coord_stage_since_ms=ml_get_time_ms();}
+    xSemaphoreGive(ml->security.lock);
+}
+void ml_coord_diag_reconnect(microlink_t *ml,unsigned reason) {
+    xSemaphoreTake(ml->security.lock,portMAX_DELAY);
+    ml->security.coord_last_reason=reason;ml->security.coord_reconnects++;
+    ml->security.coord_last_failure_ms=ml_get_time_ms();
+    xSemaphoreGive(ml->security.lock);
+}
+void ml_coord_diag_success(microlink_t *ml) {
+    xSemaphoreTake(ml->security.lock,portMAX_DELAY);
+    ml->security.coord_successes++;
+    xSemaphoreGive(ml->security.lock);
+}

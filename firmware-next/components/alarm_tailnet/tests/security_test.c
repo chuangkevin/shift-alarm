@@ -13,6 +13,12 @@ static struct pbuf packet(uint8_t h[40],uint32_t src,uint32_t dst,unsigned sport
 }
 int main(void){
  microlink_t m={.vpn_ip=0x64400001};assert(ml_security_init(&m));
+ ml_coord_diag_stage(&m,8);assert(m.security.coord_stage==8&&m.security.coord_stage_since_ms==1000);
+ clock_ms=2000;ml_coord_diag_stage(&m,8);assert(m.security.coord_stage_since_ms==1000);
+ ml_coord_diag_reconnect(&m,ML_COORD_REASON_POLL);assert(m.security.coord_reconnects==1&&m.security.coord_last_reason==ML_COORD_REASON_POLL&&m.security.coord_last_failure_ms==2000);
+ ml_security_close(&m);assert(m.security.coord_last_reason==ML_COORD_REASON_POLL);
+ ml_coord_diag_success(&m);assert(m.security.coord_successes==1&&m.security.coord_last_reason==ML_COORD_REASON_POLL);
+ ml_coord_diag_stage(&m,9);assert(m.security.coord_stage_since_ms==2000);clock_ms=1000;
  uint8_t h[40];struct pbuf p=packet(h,0x64400002,m.vpn_ip,5000,80);
  assert(!ml_security_packet(&p,false,&m));
  assert(auth(&m,"{\"AuthURL\":\"https://evil.test/login\"}")==-1);

@@ -15,6 +15,11 @@ typedef struct {
     char ip[16];
     int64_t expires_at;
     bool acl_ready;
+    uint32_t coord_stage, coord_last_reason, coord_reconnects, coord_successes;
+    uint64_t coord_stage_since_ms, coord_last_failure_ms;
+    bool policy_ready, peers_ready, node_authorized;
+    uint32_t peer_generation;
+
     esp_err_t last_error;
     uint16_t peer_count, peer_capacity;
     bool capacity_exceeded;

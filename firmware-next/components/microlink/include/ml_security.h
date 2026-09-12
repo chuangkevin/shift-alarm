@@ -29,6 +29,8 @@ typedef struct {
     bool peers_ready, peer_install_failed, capacity_exceeded;
     unsigned observed_peer_count;
     uint32_t peer_generation;
+    uint32_t coord_stage, coord_last_reason, coord_reconnects, coord_successes;
+    uint64_t coord_stage_since_ms, coord_last_failure_ms;
     ml_allowed_peer_t peers[ML_POLICY_MAX_PEERS];
     unsigned peer_count;
     ml_flow_t flows[16];
@@ -52,3 +54,12 @@ bool ml_security_packet(struct pbuf *p, bool outbound, void *ctx);
 
 int64_t ml_parse_expiry(const char *s);
 bool ml_peer_map_update(struct microlink_s *ml,cJSON *map);
+
+/* Fixed numeric diagnostics only: never accepts control text or credentials. */
+enum { ML_COORD_REASON_NONE, ML_COORD_REASON_FORCED, ML_COORD_REASON_TCP,
+ ML_COORD_REASON_NOISE, ML_COORD_REASON_H2, ML_COORD_REASON_AUTH_PENDING,
+ ML_COORD_REASON_REGISTER, ML_COORD_REASON_MAP, ML_COORD_REASON_WATCHDOG,
+ ML_COORD_REASON_EXPIRED, ML_COORD_REASON_PING, ML_COORD_REASON_POLL };
+void ml_coord_diag_stage(struct microlink_s *ml,unsigned stage);
+void ml_coord_diag_reconnect(struct microlink_s *ml,unsigned reason);
+void ml_coord_diag_success(struct microlink_s *ml);

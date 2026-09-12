@@ -246,3 +246,32 @@ the new fixtures, the previous implementation fails its initial queued-ADD
 assertion; with the fix all four Tailnet host suites pass under UBSan.
 This identifies a pre-transport blocker; successful real TCP still requires
 validation of the forward firmware candidate.
+
+### Coordinator recovery diagnostics
+
+Status now exposes numeric `coord_stage`, `coord_last_reason`, `coord_reconnects`,
+`coord_successes`, monotonic `coord_stage_since_ms` / `coord_last_failure_ms`,
+and separate `policy_ready`, `peers_ready`, `node_authorized`, `peer_generation`.
+These are cached under the existing security lock; they contain no control
+response text, authorization URL, identity or keys. The last failure survives
+successful reconnection so transient failures remain observable. Counters reset
+when the native client is destroyed. Success counts completion of initial map
+fetch, not application TCP success. Stage timestamps describe the current
+state-machine iteration and can lag one iteration after a transition.
+
+Stages: 0 idle, 1 STUN, 2 DNS/connect, 3 TCP (reserved by current state machine),
+4 Noise, 5 H2 preface, 6 register, 7 map fetch, 8 long poll, 9 reconnect/backoff.
+Reasons: 0 none, 1 forced reconnect, 2 DNS/TCP failure, 3 Noise failure,
+4 H2 preface failure, 5 browser approval pending, 6 register failure,
+7 initial map failure, 8 watchdog, 9 expired key, 10 PING send failure,
+11 long-poll failure. Reconnect counts include explicit requests and pending
+browser approval, not just network failures.
+
+In the 0.2.6 diagnostic interval, all six decrypted inbound packets and all
+24 outgoing packets were dropped, and subsequent status showed connected=false
+and acl_ready=false. This identifies a post-connection security closure, not
+a proven incoming-only ACL failure. The 150-second boot capture ends before
+this transition. Fresh successful full-map recovery has a RESET/ADD/SYNC_DONE
+generation path; no permanent readiness restoration defect was demonstrated.
+The additional fields make the next runtime observation discriminate control
+reconnect, policy compilation, peer installation and own-node authorization.

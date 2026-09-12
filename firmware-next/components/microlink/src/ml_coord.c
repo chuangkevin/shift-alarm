@@ -1938,6 +1938,7 @@ void ml_coord_task(void *arg) {
                 ml->state = ML_STATE_IDLE;
                 break;
             case ML_CMD_FORCE_RECONNECT:
+                ml_coord_diag_reconnect(ml,ML_COORD_REASON_FORCED);
                 state = COORD_RECONNECTING;
                 break;
             case ML_CMD_UPDATE_ENDPOINTS:
@@ -1949,6 +1950,7 @@ void ml_coord_task(void *arg) {
         /* DERP reconnect is now handled by the DERP I/O task itself.
          * The I/O task checks ML_EVT_DERP_RECONNECT directly. */
 
+        ml_coord_diag_stage(ml,(unsigned)state);
         switch (state) {
         case COORD_IDLE:
             vTaskDelay(pdMS_TO_TICKS(100));
@@ -1986,6 +1988,7 @@ void ml_coord_task(void *arg) {
         case COORD_TCP_CONNECT:
             if (do_tcp_connect(ml) < 0) {
                 ESP_LOGE(TAG, "TCP connect failed, retrying...");
+                ml_coord_diag_reconnect(ml,ML_COORD_REASON_TCP);
                 state = COORD_RECONNECTING;
                 break;
             }
@@ -1999,6 +2002,7 @@ void ml_coord_task(void *arg) {
                 ESP_LOGE(TAG, "Noise handshake failed");
                 ml_close_sock(ml->coord_sock);
                 ml->coord_sock = -1;
+                ml_coord_diag_reconnect(ml,ML_COORD_REASON_NOISE);
                 state = COORD_RECONNECTING;
                 break;
             }
@@ -2014,6 +2018,7 @@ void ml_coord_task(void *arg) {
                 ESP_LOGE(TAG, "H2 preface failed");
                 ml_close_sock(ml->coord_sock);
                 ml->coord_sock = -1;
+                ml_coord_diag_reconnect(ml,ML_COORD_REASON_H2);
                 state = COORD_RECONNECTING;
                 break;
             }
@@ -2027,12 +2032,14 @@ void ml_coord_task(void *arg) {
                 /* Followup waits for browser approval on a fresh H2 stream. */
                 ml_close_sock(ml->coord_sock);ml->coord_sock=-1;
                 vTaskDelay(pdMS_TO_TICKS(2000));
+                ml_coord_diag_reconnect(ml,ML_COORD_REASON_AUTH_PENDING);
                 state=COORD_RECONNECTING;break;
             }
             if (reg_result < 0) {
                 ESP_LOGE(TAG, "Registration failed");
                 ml_close_sock(ml->coord_sock);
                 ml->coord_sock = -1;
+                ml_coord_diag_reconnect(ml,ML_COORD_REASON_REGISTER);
                 state = COORD_RECONNECTING;
                 break;
             }
@@ -2045,6 +2052,7 @@ void ml_coord_task(void *arg) {
                 ESP_LOGW(TAG, "MapRequest failed, will retry");
                 ml_close_sock(ml->coord_sock);
                 ml->coord_sock = -1;
+                ml_coord_diag_reconnect(ml,ML_COORD_REASON_MAP);
                 state = COORD_RECONNECTING;
                 break;
             }
@@ -2084,6 +2092,7 @@ void ml_coord_task(void *arg) {
                 ESP_LOGI(TAG, "Sent initial HTTP/2 PING after long-poll");
             }
 
+            ml_coord_diag_success(ml);
             state = COORD_LONG_POLL;
             ml->state = ML_STATE_CONNECTED;
             reconnect_attempts = 0;
@@ -2102,6 +2111,7 @@ void ml_coord_task(void *arg) {
                 /* Check control plane watchdog (120s) */
                 if (now - last_activity_ms > ml->t_ctrl_watchdog_ms) {
                     ESP_LOGW(TAG, "Control plane watchdog timeout");
+                    ml_coord_diag_reconnect(ml,ML_COORD_REASON_WATCHDOG);
                     state = COORD_RECONNECTING;
                     break;
                 }
@@ -2262,6 +2272,7 @@ void ml_coord_task(void *arg) {
                         if (ml->key_expired) {
                             if (ml->config.auth_key) {
                                 ESP_LOGW(TAG, "Key expired, re-registering with auth_key...");
+                                ml_coord_diag_reconnect(ml,ML_COORD_REASON_EXPIRED);
                                 state = COORD_RECONNECTING;
                                 break;
                             } else {
@@ -2296,6 +2307,7 @@ void ml_coord_task(void *arg) {
                         last_activity_ms = now;
                     } else {
                         ESP_LOGW(TAG, "H2 PING send failed, reconnecting");
+                        ml_coord_diag_reconnect(ml,ML_COORD_REASON_PING);
                         state = COORD_RECONNECTING;
                         break;
                     }
@@ -2307,6 +2319,7 @@ void ml_coord_task(void *arg) {
                     last_activity_ms = now;  /* Reset watchdog */
                 } else if (poll_ret < 0) {
                     ESP_LOGW(TAG, "Long-poll connection lost");
+                    ml_coord_diag_reconnect(ml,ML_COORD_REASON_POLL);
                     state = COORD_RECONNECTING;
                     break;
                 }
