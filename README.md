@@ -1,50 +1,68 @@
-# 班表鬧鐘 v0.1.0
+# 班表鬧鐘
 
-ESP32 星智 CUBE 1.54 吋版 + 私有區網班表管理服務。
+ESP32-S3 星智 CUBE 1.54 吋獨立鬧鐘。班表與響鈴設定保存在裝置；手機在裝置網頁編輯月曆，也可經裝置的原生 Tailscale 上傳圖片至私有辨識服務。
 
-## 第一次使用
+目前新版韌體位於 `firmware-next/`（0.2.8 候選版），後端版本為 0.1.0。**候選版的建置成功不等於實機驗收完成**；原生 Tailscale 完整辨識流程與實機 OTA 的最終結果仍待確認。先前同區網路徑的辨識成功，不算 Tailscale 驗收。
 
-1. 裝置第一次開機建立 `ShiftAlarm-XXXX` Wi-Fi 熱點，顯示加入熱點的 QR Code。
-2. 手機掃描加入裝置熱點；按裝置 `+` 切換網頁 QR，打開 `http://192.168.4.1`。
-3. 在裝置本地網頁掃描、選取家中 Wi-Fi 並輸入密碼。此步驟不需要 Tailscale、New API 或 Pi。
-4. Wi-Fi 測試成功才保存；失敗會保留配網模式。成功後螢幕顯示裝置區網網址 QR 與下一次鬧鐘。
-5. 從區網管理入口上傳月班表；檢查辨識結果、套用，再設定每天固定響鈴時間並啟用。
+## 第一次使用與換網路
 
-原小智韌體的 Wi-Fi 不會自動帶入。同時按住＋和－十秒重新配網方法見 `firmware/README.md`。
+1. 首次開機建立 `ShiftAlarm-XXXX` 熱點並顯示 QR Code；手機加入後開啟 `http://192.168.4.1`。不沿用原廠韌體的 Wi-Fi。
+2. 在裝置頁面掃描、選擇 Wi-Fi 並輸入密碼。連線與設定保存成功才關閉配網熱點；失敗可重試。
+3. 使用畫面上的裝置網址進入「班表與鬧鐘」。手動設定日期與時間不需要辨識伺服器。
+4. 要使用圖片辨識或下載更新，先在「Tailscale 連線」完成官方授權，並確認裝置能經原生 Tailscale 到達後端。
+5. 更換環境時，同時按住「＋」與「－」十秒，倒數完成後開啟配網；放開會取消。也可從裝置設定重新配網。一般斷網不會自動開放熱點。
 
-## 班表與響鈴
+裝置不需要與 Pi 或 GN100 位於相同區網。手機到裝置的本地 Wi-Fi 是操作入口；**裝置到辨識／OTA 後端必須使用原生 Tailscale，不得以同區網位址替代驗收或作為備援設計**。
 
-- New API `general` 讀圖；上班、必上班視為上班，休假、必休假視為休假。
-- 儘量放假、不清楚或其他班別先標待確認；待確認不產生鬧鐘，可手動調整。
-- 必須完整列出指定月份，缺日、重複、錯誤月份會拒絕，不會覆蓋原有班表。
-- 每天最多四個響鈴時間；時區 Asia/Taipei。初始時間空白且未啟用。
-- 裝置保存排程，斷網仍可依現有可信時鐘響鈴；斷電後未完成校時不能保證時間正確。
-- 網頁的「已同步」依裝置回報revision，不能只因後端保存成功就宣稱裝置收到。
-- 測試按鈕只新增一次20秒後測試鬧鐘；物理停鈴/貪睡詳見firmware文件。
+## 月曆與鬧鐘
 
-## 後端
+- `/calendar` 為統一班表頁，`/schedule` 轉至同一頁。選月份、點選上班日期，再用時／分選單設定每天最多八個時間。
+- 初始時間空白；有上班日而沒有響鈴時間時不能儲存。沒有上班日也可保存時間，重新開機仍保留。
+- 儲存只替換當月，其他月份保留。月份設定與鬧鐘一起原子保存；最多 120 個月份設定、512 個鬧鐘。
+- 手機上傳圖片先在瀏覽器壓成 JPEG（原圖最多 32 MB、長邊最多 1600 像素），減少傳輸時間；後端仍驗證實際圖片與大小。
+- 圖片辨識僅填入待儲存草稿，不會直接覆蓋裝置班表。橙色待確認日期須逐日處理；取消、逾時或辨識失敗會保留原有草稿日期。
+- 辨識必須包含圖片標示的完整年月與當月所有日期。上班／必上班、休假／必休假按原文字分類，模糊或其他文字需確認。
+- 一次性測試鬧鐘不會被轉成每日固定時間。舊月份若每天時間不同，統一時間前會要求確認。
+- 使用臺灣時間，每三小時 SNTP 校時，也可從 `/clock` 手動調整。斷網可依現有時鐘與已保存排程響鈴；斷電後仍須重新取得可信時間，沒有斷電走時保證。
+- 響鈴時按任一實體按鈕停止；螢幕方向可保存為 0／90／180／270 度。Wi-Fi、方向、月份設定及排程均須在重啟驗收時確認。
 
-Python 3.12，`pip install -r requirements.txt`，`uvicorn app:app --host 127.0.0.1 --port 8237`。
-使用環境變數（不提交秘密）：
+## 私有後端
 
-| 變數 | 用途 |
+Python 3.12 / FastAPI，部署在 `rpi-matrix:/home/kevin/DockerCompose/shift-alarm`，服務位址 `http://100.126.226.79:8237`。`https://alarm.sisihome.org` 經 GN100 Caddy 限 Tailnet 存取；沒有新增公開 Tunnel、Funnel 或公開連接埠。
+
+圖片辨識目前使用 New API 的 OpenAI-compatible 介面與 `gemini-flash`。裝置網頁先做八秒健康檢查，整次等待最多六十秒；後端模型呼叫最多四十五秒。逾時會中止等待，不套用班表。辨識金鑰僅存在後端，不放進裝置或瀏覽器。
+
+| 環境變數 | 用途 |
 |---|---|
-| NEWAPI_URL | OpenAI-compatible base，預設 `https://newapi.sisihome.org/v1` |
-| NEWAPI_KEY | 本應用獨立 general-only token |
-| NEWAPI_MODEL | 預設 general |
-| DEVICE_TOKEN | 獨立裝置token，與韌體配對 |
-| MANAGEMENT_URL | 區網管理網址 |
-| REMOTE_URL | 可選Tailnet遠端網址 |
-| ALARM_DATA | 持久資料目錄，預設 ./data |
-| ALLOWED_HOSTS | 允許HTTP Host，逗號分隔 |
+| `NEWAPI_URL` | 介面 base，預設 `https://newapi.sisihome.org/v1` |
+| `NEWAPI_KEY` | 此服務專用辨識金鑰 |
+| `NEWAPI_MODEL` | 預設 `gemini-flash`，須確認該金鑰有模型權限 |
+| `DEVICE_TOKEN` | 後端／裝置共用授權與 OTA 清單 HMAC 金鑰 |
+| `MANAGEMENT_URL` / `REMOTE_URL` | 管理入口 |
+| `ALARM_DATA` | 持久資料目錄，預設 `./data` |
+| `ALLOWED_HOSTS` | 允許的 HTTP Host |
 
-既有部署：rpi-matrix `/home/kevin/DockerCompose/shift-alarm`，Compose project `shift-alarm`，LAN `192.168.18.31:8237`、tailnet `100.126.226.79:8237`，GN100 Caddy入口 `alarm.sisihome.org`。部署時依實際主機修改compose的IP；不要綁不受保護的公網介面。
+後端的舊雲端班表頁不等於裝置目前的本地月份設定；以裝置 `/calendar` 的保存結果為準。備份 SQLite 請使用 backup API，或停止服務後一併保存 DB／WAL 與圖片；不要只複製正在寫入的主資料庫檔。
 
-資料在 `data/alarm.sqlite3`（WAL）和正規化班表图片。備份請用SQLite backup API或停止本服務後一併保存DB/WAL與圖片。API key與DEVICE_TOKEN僅放伺服器環境和device私有設定，不返回管理頁。
+## 開發、首次燒錄與 OTA
 
-## 驗證
+新版使用 ESP-IDF 5.3.2 / Arduino 3.1.3。`firmware/` 是舊 PlatformIO 實作，不能作為新版更新映像。操作步驟與回退條件見 [更新部署](docs/更新部署.md)、[Tailscale OTA 操作](docs/Tailscale-OTA.md)、[OTA 元件](firmware-next/components/alarm_ota/README.md) 及 [原生 Tailscale](firmware-next/components/alarm_tailnet/README.md)。
 
-`python -m pytest -q`；`node --check static/app.js`；`docker build -t shift-alarm:0.1.0 .`；`pio run -d firmware`。
-CI定義包含backend、Docker和firmware；尚未推送新專案，因此未有GitHub Actions執行結果。目前主機以來源檔部署，待建立Git遠端並改為clone後，才可使用 `deploy/update.sh`。GitHub SSH認證可用，但目前沒有可建立新儲存庫的API或網頁登入。
+```sh
+# 已載入 ESP-IDF 5.3.2 環境
+idf.py -C firmware-next build
+idf.py -C firmware-next size
 
-初次實測New API辨識2026-09附圖：4、8、9、11、13、14、17、20、24、25、29上班，完整30日；正式鬧鐘保持未啟用，等待使用者設定時間。
+# Python 3.12 虛擬環境
+python -m pip install -r requirements.txt
+python -m pytest -q
+node --check static/app.js
+```
+
+首次改用新版分區配置需要受控 USB 安裝；先識別實際板子並保存該板完整私有備份。後續 OTA 只發布應用程式 `.bin`，不能發布整片 Flash 備份、bootloader 或 partition table。發布工具先驗證板型、遞增版本、大小、XOR 與內建 SHA-256，再原子切換後端的發布清單；發布不會讓裝置自動安裝。
+
+裝置「裝置更新」由操作者確認穩定供電後啟動，經 Tailscale 下載並驗證 bearer 授權、HMAC、SHA-256、板型與版本，寫入備用應用程式分區。響鈴中、貪睡中、未校時、沒有排程狀態或五分鐘內有鬧鐘時不能啟用更新。更新後保留設定；開機自測／回退須依部署文件個別驗收，不把首次 USB 安裝當成已有舊版回退保障。
+
+`provisioning.h`、`.env`、節點身分、Flash 備份及帶憑證映像均為私密檔案，不提交 Git，也不放公開 Releases。CI 使用無裝置憑證的建置；實際部署憑證只在受控環境注入。
+
+GitHub 儲存庫：[chuangkevin/shift-alarm](https://github.com/chuangkevin/shift-alarm)，首次推送與 Actions 執行結果尚待完成。現有主機曾以來源檔部署；`deploy/update.sh` 須在主機改為正確 Git clone 並設定遠端後才適用。
