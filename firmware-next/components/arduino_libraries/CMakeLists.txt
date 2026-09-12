@@ -1,0 +1,26 @@
+idf_component_register(SRCS
+    "Adafruit_BusIO/Adafruit_GenericDevice.cpp"
+    "Adafruit_BusIO/Adafruit_BusIO_Register.cpp"
+    "Adafruit_BusIO/Adafruit_I2CDevice.cpp"
+    "Adafruit_BusIO/Adafruit_SPIDevice.cpp"
+    "Adafruit_GFX_Library/Adafruit_SPITFT.cpp"
+    "Adafruit_GFX_Library/glcdfont.c"
+    "Adafruit_GFX_Library/Adafruit_GFX.cpp"
+    "Adafruit_GFX_Library/Adafruit_GrayOLED.cpp"
+    "Adafruit_SSD1306/Adafruit_SSD1306.cpp"
+    "Adafruit_ST7735_and_ST7789_Library/Adafruit_ST7789.cpp"
+    "Adafruit_ST7735_and_ST7789_Library/Adafruit_ST7796S.cpp"
+    "Adafruit_ST7735_and_ST7789_Library/Adafruit_ST77xx.cpp"
+    "Adafruit_ST7735_and_ST7789_Library/Adafruit_ST7735.cpp"
+    "QRCode/src/qrcode.c"
+INCLUDE_DIRS
+    "Adafruit_BusIO"
+    "Adafruit_GFX_Library"
+    "Adafruit_SSD1306"
+    "Adafruit_ST7735_and_ST7789_Library"
+    "ArduinoJson"
+    "ArduinoJson/src"
+    "QRCode"
+    "QRCode/src"
+REQUIRES arduino-esp32)
+set_source_files_properties("QRCode/src/qrcode.c" PROPERTIES COMPILE_OPTIONS "-Wno-unknown-pragmas")

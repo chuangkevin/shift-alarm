@@ -22,3 +22,28 @@ jobs:
       - run: pip install platformio
       - run: c++ -std=c++17 firmware/test/scheduler_test.cpp -o /tmp/shift-alarm-test && /tmp/shift-alarm-test
       - run: pio run -d firmware
+  firmware-next:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.3.2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ESP32-S3 candidate without device secrets
+        shell: bash
+        run: |
+          . /opt/esp/idf/export.sh
+          idf.py -C firmware-next build
+          idf.py -C firmware-next size
+          python firmware-next/patches/tests/test_patch.py
+  firmware-policies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: firmware-next/components/alarm_ota/tests/run_host_tests.sh
+      - run: python firmware-next/components/alarm_ota/tests/test_manifest_contract.py
+      - run: firmware-next/components/alarm_proxy/test/run_host_tests.sh
+      - run: sudo apt-get update && sudo apt-get install -y libcjson-dev pkg-config
+      - run: firmware-next/components/alarm_tailnet/tests/run_host_tests.sh
+      - run: firmware-next/patches/tests/run_host_tests.sh
