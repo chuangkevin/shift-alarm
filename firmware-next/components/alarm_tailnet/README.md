@@ -125,7 +125,31 @@ has separate regression coverage maintained alongside its parser.
 An independent ESP-IDF 5.3.2 smoke application compiles and links the full
 reachable lifecycle. AddressSanitizer could not initialize on the development
 Mac, so no ASan success is claimed. None of these tests enroll a real node or
-exercise hardware. No firmware was flashed and no real Tailnet secrets were
-used. Hardware acceptance still needs actual AuthURL approval, TCP/8237 and
-TCP/80 traffic, certificate rejection, reconnect, manual reauth, expiry,
-revocation and memory-headroom checks with the display UI active.
+exercise hardware. These host checks do not access real Tailnet secrets.
+The 0.2.2 device has completed real enrollment and reports 58/64 peers, but
+both backend TCP/8237 and incoming TCP/80 timed out. Control-plane
+`connected` / `acl_ready` is not proof of working WireGuard or TCP traffic.
+Hardware acceptance of this repair remains pending; this debugging unit
+must not flash, reboot or open the device's serial port.
+
+### Data-path repair and known remaining blocker
+
+Map endpoints are now DISCO candidates rather than active WG destinations.
+The first native BSD-socket connection starts with DERP. A direct handshake
+also queues the **same** initiation over DERP, preserving its response index
+while avoiding an unreachable UDP endpoint stranding the connection.
+Authenticated relayed input selects DERP for subsequent encrypted replies;
+the previous code restored a stale UDP endpoint after its DERP handshake
+response, which blackholed a relayed TCP SYN's SYN-ACK.
+
+A separate limitation remains: this client opens only its own home DERP
+connection (configured region 9 / Dallas). Read-only Tailscale status on the
+backend showed its home relay as Hong Kong and the device's as Dallas.
+[Upstream DERP protocol documentation](https://github.com/tailscale/tailscale/blob/main/derp/README.md)
+explicitly specifies no routing between regions. Outgoing traffic to a peer
+in another region therefore needs a connection to that peer's home region;
+fixing the WG return path alone does **not** complete this data channel.
+Do not mark the hardware repair complete until cross-region routing and
+actual bidirectional HTTP are verified. Certificate rejection, reconnect,
+manual reauth, expiry, revocation and memory headroom with the display active
+also remain hardware acceptance checks.

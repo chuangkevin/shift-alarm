@@ -1,0 +1,15 @@
+#pragma once
+#define NO_SYS 0
+#define LWIP_TCPIP_CORE_LOCKING 1
+#define LWIP_TCPIP_CORE_LOCKING_INPUT 0
+#define LWIP_IPV4 1
+#define LWIP_IPV6 1
+#define LWIP_TCP 1
+#define LWIP_UDP 1
+#define LWIP_DHCP 0
+#define LWIP_AUTOIP 0
+#define LWIP_NETCONN 0
+#define LWIP_SOCKET 0
+#define LWIP_CHECKSUM_CTRL_PER_NETIF 1
+#define MEM_LIBC_MALLOC 1
+#define MEMP_MEM_MALLOC 1

@@ -86,15 +86,11 @@ bool wireguardif_is_wireguard_packet(const uint8_t *data, size_t len) {
 
 
 static void update_peer_addr(struct wireguard_peer *peer, const ip_addr_t *addr, u16_t port) {
-	// Don't overwrite a valid endpoint with 0.0.0.0 (DERP-injected packets have no real source)
-	// This bug was causing DERP routing to break after receiving the first packet
-	if (ip_addr_isany(addr)) {
-		WG_DEBUG("[WG] update_peer_addr: skipping DERP (0.0.0.0)\n");
-		return;  // Skip updating endpoint for DERP packets
-	}
-	WG_DEBUG("[WG] update_peer_addr: %s:%u\n", ipaddr_ntoa(addr), port);
-	peer->ip = *addr;
-	peer->port = port;
+    /* Called only after WireGuard authentication. A relayed packet proves
+     * DERP is the return path too; retaining a stale UDP endpoint blackholes
+     * the TCP SYN-ACK even when the relayed handshake succeeded. */
+    peer->ip = *addr;
+    peer->port = ip_addr_isany(addr) ? 0 : port;
 }
 
 static struct wireguard_peer *peer_lookup_by_allowed_ip(struct wireguard_device *device, const ip_addr_t *ipaddr) {
@@ -134,6 +130,24 @@ static bool wireguardif_can_send_initiation(struct wireguard_peer *peer) {
 static err_t wireguardif_peer_output(struct netif *netif, struct pbuf *q, struct wireguard_peer *peer) {
     WG_CORE_GUARD;
 	struct wireguard_device *device = (struct wireguard_device *)netif->state;
+
+    /* A UDP send succeeding only means the datagram was queued locally.
+     * Race an identical initiation over DERP so a stale direct path cannot
+     * strand BSD-socket callers, which do not call ml_tcp's handshake helper.
+     * Normal transport data remains single-path. */
+    bool relayed_initiation = false;
+    uint8_t type[4];
+    if (!device->force_derp_output && !ip_addr_isany(&peer->ip) && peer->port &&
+        device->derp_output_fn && pbuf_copy_partial(q, type, sizeof(type), 0) == sizeof(type) &&
+        type[0] == MESSAGE_HANDSHAKE_INITIATION && type[1] == 0 && type[2] == 0 && type[3] == 0) {
+        uint8_t *data = mem_malloc(q->tot_len);
+        if (data) {
+            pbuf_copy_partial(q, data, q->tot_len, 0);
+            relayed_initiation = device->derp_output_fn(peer->public_key, data,
+                q->tot_len, device->derp_output_ctx) == ERR_OK;
+            mem_free(data);
+        }
+    }
 
 	WG_DEBUG("[WG_OUT] peer_output: endpoint=%s:%u, tot_len=%u\n",
 	       ip_addr_isany(&peer->ip) ? "0.0.0.0" : ipaddr_ntoa(&peer->ip), peer->port, (unsigned)q->tot_len);
@@ -183,18 +197,19 @@ static err_t wireguardif_peer_output(struct netif *netif, struct pbuf *q, struct
 			WG_DEBUG("[WG_OUT] udp_output_fn returned %d\n", result);
 		
 			mem_free(data);
-			return result;
+			return relayed_initiation ? ERR_OK : result;
 		}
 		WG_DEBUG("[WG_OUT] mem_malloc FAILED for magicsock!\n");
 	
-		return ERR_MEM;
+		return relayed_initiation ? ERR_OK : ERR_MEM;
 	}
 
 	WG_DEBUG("[WG_OUT] Using direct udp_sendto\n");
 
 	// Send to last known port, not the connect port
 	//TODO: Support DSCP and ECN - lwip requires this set on PCB globally, not per packet
-	return udp_sendto(device->udp_pcb, q, &peer->ip, peer->port);
+	err_t result = udp_sendto(device->udp_pcb, q, &peer->ip, peer->port);
+    return relayed_initiation ? ERR_OK : result;
 }
 
 static err_t wireguardif_device_output(struct wireguard_device *device, struct pbuf *q, const ip_addr_t *ipaddr, u16_t port) {
@@ -806,28 +821,9 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
 					// Update the peer location
 					update_peer_addr(peer, addr, port);
 
-					// If initiation arrived via DERP (addr=0.0.0.0), send response
-					// via DERP too by temporarily clearing the peer endpoint.
-					// The ESP32 on cellular may not reach the peer's direct endpoint.
-					ip_addr_t saved_ip;
-					u16_t saved_port;
-					bool via_derp = ip_addr_isany(addr);
-					if (via_derp) {
-						saved_ip = peer->ip;
-						saved_port = peer->port;
-						ip_addr_set_any(false, &peer->ip);
-						peer->port = 0;
-						printf("[WG_RX] Sending response via DERP (initiation was relayed)\n");
-					}
-
-					// Send back a handshake response
-					wireguardif_send_handshake_response(device, peer);
-
-					// Restore peer endpoint after sending
-					if (via_derp) {
-						peer->ip = saved_ip;
-						peer->port = saved_port;
-					}
+                    /* Keep the authenticated transport for both the handshake
+                     * response and subsequent encrypted TCP replies. */
+                    wireguardif_send_handshake_response(device, peer);
 				} else {
 					printf("[WG_RX] Initiation process FAILED (bad keys/timestamp?)\n");
 				}
