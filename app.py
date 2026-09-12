@@ -5,6 +5,7 @@ import calendar
 import hashlib
 import hmac
 import io
+import ipaddress
 import json
 import os
 import re
@@ -291,8 +292,18 @@ def test_alarm():
     return {'alarm': a}
 
 @app.get('/api/qr.svg')
-def qr():
-    im = qrcode.make(MANAGEMENT_URL, image_factory=qrcode.image.svg.SvgPathImage, border=3)
+def qr(url: str | None = None):
+    target = MANAGEMENT_URL
+    if url is not None:
+        try:
+            parsed = urlsplit(url)
+            address = ipaddress.IPv4Address(parsed.hostname)
+            if len(url) > 128 or parsed.scheme != 'http' or parsed.port != 8080 or not any(address in ipaddress.IPv4Network(net) for net in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')) or parsed.username or parsed.password or parsed.path not in ('', '/') or parsed.query or parsed.fragment:
+                raise ValueError('invalid local management URL')
+            target = url
+        except (ValueError, TypeError):
+            raise HTTPException(422, '區網管理網址無效')
+    im = qrcode.make(target, image_factory=qrcode.image.svg.SvgPathImage, border=3)
     b = io.BytesIO()
     im.save(b)
     return Response(b.getvalue(), media_type='image/svg+xml')

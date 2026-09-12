@@ -4,6 +4,7 @@
 data
 secrets
 firmware
+firmware-next
 work
 tests
 .ai-review
