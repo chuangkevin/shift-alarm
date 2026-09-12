@@ -1,3 +1,4 @@
+#include "ota_download_policy.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -245,6 +246,7 @@ String devicePage(String content) {
 </style><header><div class="brand-icon">◷</div><div class="brand"><small>每個上班日，準時提醒</small><strong>班表鬧鐘</strong></div><span class="badge">裝置設定</span></header><main><section class="card">)PAGE")+content+"</section></main><footer>設定保存在你的裝置 · 重新開機仍會保留</footer></html>";
 }
 bool localNonce();
+std::atomic<uint32_t> otaReceived{0},otaTotal{0};
 std::atomic<bool> otaBusy{false},otaPowerConfirmed{false};
 std::atomic<alarm_ota_handle_t> otaActivation{0};
 bool otaReady=false;int otaSession;
@@ -297,21 +299,23 @@ void otaWorker(void*){
     const char *board=m["board"]|"",*version=m["version"]|"",*sha=m["sha256"]|"",*mac=m["hmac_sha256"]|"";
     if(strlen(board)>=sizeof(manifest.board)||strlen(version)>=sizeof(manifest.version)||strlen(sha)!=64||strlen(mac)!=64||!m["size"].is<uint32_t>()){otaMessageSet("更新資訊格式無效");break;}
     strlcpy(manifest.board,board,sizeof(manifest.board));strlcpy(manifest.version,version,sizeof(manifest.version));strlcpy(manifest.sha256,sha,sizeof(manifest.sha256));strlcpy(manifest.hmac_sha256,mac,sizeof(manifest.hmac_sha256));manifest.size=m["size"];
+    otaTotal.store(manifest.size);
     err=alarm_ota_begin(&manifest,&otaSession,&handle);if(err!=ESP_OK){otaMessageSet("更新遭拒：請確認版本、排程與電源");break;}
     h.begin(backend+"/api/device/firmware/"+manifest.sha256+".bin");h.addHeader("Authorization",String("Bearer ")+token);
     if(h.GET()!=200||h.getSize()!=int(manifest.size)){otaMessageSet("更新檔大小或回應不正確");break;}
-    auto *stream=h.getStreamPtr();uint8_t buffer[4096];size_t received=0;uint32_t started=millis();bool failed=false;
+    auto *stream=h.getStreamPtr();uint8_t buffer[4096];size_t received=0;uint32_t started=millis(),lastProgress=started;const char *failure=nullptr;
     otaMessageSet("正在下載並驗證，請保持供電");
     while(received<manifest.size){
-      if(millis()-started>=120000){failed=true;break;}
+      auto limit=alarm_download::deadline(millis(),started,lastProgress);
+      if(limit!=alarm_download::Deadline::none){failure=limit==alarm_download::Deadline::total?"下載超過十分鐘，保留原有版本":"下載三十秒沒有進度，保留原有版本";break;}
       int available=stream->available();
-      if(available<=0){if(!h.connected()){failed=true;break;}vTaskDelay(pdMS_TO_TICKS(1));continue;}
+      if(available<=0){if(!h.connected()){failure="下載連線中斷，保留原有版本";break;}vTaskDelay(pdMS_TO_TICKS(1));continue;}
       size_t need=std::min(sizeof(buffer),std::min(size_t(available),size_t(manifest.size-received)));
       int n=stream->read(buffer,need);
-      if(n<=0||alarm_ota_write(handle,&otaSession,buffer,size_t(n))!=ESP_OK){failed=true;break;}
-      received+=size_t(n);vTaskDelay(1);
+      if(n<=0||alarm_ota_write(handle,&otaSession,buffer,size_t(n))!=ESP_OK){failure="更新寫入或安全檢查失敗，保留原有版本";break;}
+      received+=size_t(n);otaReceived.store(received);lastProgress=millis();vTaskDelay(1);
     }
-    h.end();if(failed){otaMessageSet("更新中止，保留原有版本");break;}
+    h.end();if(failure){otaMessageSet(failure);break;}
     if(alarm_ota_finish(handle,&otaSession)!=ESP_OK){otaMessageSet("更新驗證失敗，保留原有版本");break;}
     otaMessageSet("驗證通過，準備重新啟動");
     readyToActivate=true;
@@ -323,9 +327,9 @@ void otaWorker(void*){
  vTaskDelete(nullptr);
 }
 void otaRoutes(){
- server.on("/update",HTTP_GET,[]{String page=R"HTML(<h1>裝置更新</h1><p>更新寫入備用分區，通過驗證才重新啟動。響鈴中、貪睡中或五分鐘內有鬧鐘時不進行更新。</p><p id="status">正在取得狀態…</p><form id="update"><label><input type="checkbox" id="power" required>我已接上穩定電源，更新完成前不拔除</label><button>檢查並安裝已發布版本</button></form><p class="help">電源確認由你提供，裝置未量測外接電壓。更新失敗會保留原有版本。</p><a href="/display">返回裝置設定</a><script>const nonce='NONCE';const statusEl=document.querySelector('#status');async function refresh(){try{const r=await fetch('/api/update',{headers:{'X-Setup-Nonce':nonce}});const d=await r.json();statusEl.textContent=d.message;}catch(e){statusEl.textContent='裝置可能正在重新啟動，請稍候重新整理。'}}document.querySelector('#update').onsubmit=async(e)=>{e.preventDefault();if(!document.querySelector('#power').checked)return;const r=await fetch('/api/update/start',{method:'POST',headers:{'X-Setup-Nonce':nonce,'Content-Type':'application/x-www-form-urlencoded'},body:'power_confirmed=1'});statusEl.textContent=await r.text();};refresh();setInterval(refresh,2000);</script>)HTML";page.replace("NONCE",setupNonce);server.send(200,"text/html; charset=utf-8",devicePage(page));});
- server.on("/api/update",HTTP_GET,[]{if(!localNonce())return;JsonDocument d;d["message"]=otaMessageGet();d["busy"]=otaBusy.load();d["ready"]=otaReady;String out;serializeJson(d,out);server.send(200,"application/json",out);});
- server.on("/api/update/start",HTTP_POST,[]{if(!localNonce())return;if(!otaReady||!WiFi.isConnected()){server.send(503,"text/plain; charset=utf-8","更新功能尚未就緒");return;}if(server.arg("power_confirmed")!="1"){server.send(400,"text/plain; charset=utf-8","請先確認穩定供電");return;}bool expected=false;if(!otaBusy.compare_exchange_strong(expected,true)){server.send(409,"text/plain; charset=utf-8","更新正在進行中");return;}otaPowerConfirmed=true;if(xTaskCreate(otaWorker,"alarm_update",12288,nullptr,1,nullptr)!=pdPASS){otaBusy=false;otaPowerConfirmed=false;server.send(503,"text/plain; charset=utf-8","記憶體不足，請稍後重試");return;}server.send(202,"text/plain; charset=utf-8","開始檢查更新");});
+ server.on("/update",HTTP_GET,[]{String page=R"HTML(<h1>裝置更新</h1><p>更新寫入備用分區，通過驗證才重新啟動。響鈴中、貪睡中或五分鐘內有鬧鐘時不進行更新。</p><p id="status">正在取得狀態…</p><form id="update"><label><input type="checkbox" id="power" required>我已接上穩定電源，更新完成前不拔除</label><button>檢查並安裝已發布版本</button></form><p class="help">電源確認由你提供，裝置未量測外接電壓。更新失敗會保留原有版本。</p><a href="/display">返回裝置設定</a><script>const nonce='NONCE';const statusEl=document.querySelector('#status');async function refresh(){try{const r=await fetch('/api/update',{headers:{'X-Setup-Nonce':nonce}});const d=await r.json();statusEl.textContent=d.message+(d.total>0?'（已接收 '+d.received+' / '+d.total+' 位元組，'+Math.floor(d.received*100/d.total)+'%）':'');}catch(e){statusEl.textContent='裝置可能正在重新啟動，請稍候重新整理。'}}document.querySelector('#update').onsubmit=async(e)=>{e.preventDefault();if(!document.querySelector('#power').checked)return;const r=await fetch('/api/update/start',{method:'POST',headers:{'X-Setup-Nonce':nonce,'Content-Type':'application/x-www-form-urlencoded'},body:'power_confirmed=1'});statusEl.textContent=await r.text();};refresh();setInterval(refresh,2000);</script>)HTML";page.replace("NONCE",setupNonce);server.send(200,"text/html; charset=utf-8",devicePage(page));});
+ server.on("/api/update",HTTP_GET,[]{if(!localNonce())return;JsonDocument d;d["message"]=otaMessageGet();d["busy"]=otaBusy.load();d["ready"]=otaReady;d["received"]=otaReceived.load();d["total"]=otaTotal.load();String out;serializeJson(d,out);server.send(200,"application/json",out);});
+ server.on("/api/update/start",HTTP_POST,[]{if(!localNonce())return;if(!otaReady||!WiFi.isConnected()){server.send(503,"text/plain; charset=utf-8","更新功能尚未就緒");return;}if(server.arg("power_confirmed")!="1"){server.send(400,"text/plain; charset=utf-8","請先確認穩定供電");return;}bool expected=false;if(!otaBusy.compare_exchange_strong(expected,true)){server.send(409,"text/plain; charset=utf-8","更新正在進行中");return;}otaReceived.store(0);otaTotal.store(0);otaPowerConfirmed=true;if(xTaskCreate(otaWorker,"alarm_update",12288,nullptr,1,nullptr)!=pdPASS){otaBusy=false;otaPowerConfirmed=false;server.send(503,"text/plain; charset=utf-8","記憶體不足，請稍後重試");return;}server.send(202,"text/plain; charset=utf-8","開始檢查更新");});
 }
 String tailnetLabel(alarm_tailnet_state_t state) {
   switch(state){case ALARM_TAILNET_CONNECTED:return "Tailscale已連線";case ALARM_TAILNET_AUTH_REQUIRED:return "等待登入授權";case ALARM_TAILNET_EXPIRED:return "授權已到期";case ALARM_TAILNET_BLOCKED:return "存取規則尚未通過";case ALARM_TAILNET_CONNECTING:return "正在連線";default:return "尚未連線";}
@@ -464,7 +468,7 @@ void setup() {
   i2s_config_t cfg={};cfg.mode=(i2s_mode_t)(I2S_MODE_MASTER|I2S_MODE_TX);cfg.sample_rate=24000;cfg.bits_per_sample=I2S_BITS_PER_SAMPLE_16BIT;cfg.channel_format=I2S_CHANNEL_FMT_RIGHT_LEFT;cfg.communication_format=I2S_COMM_FORMAT_STAND_I2S;cfg.intr_alloc_flags=ESP_INTR_FLAG_LEVEL1;cfg.dma_buf_count=6;cfg.dma_buf_len=256;cfg.tx_desc_auto_clear=true;
   i2s_pin_config_t pins={};pins.mck_io_num=I2S_PIN_NO_CHANGE;pins.bck_io_num=15;pins.ws_io_num=16;pins.data_out_num=7;pins.data_in_num=I2S_PIN_NO_CHANGE;
   ESP_ERROR_CHECK(i2s_driver_install(I2S_NUM_0,&cfg,0,nullptr));ESP_ERROR_CHECK(i2s_set_pin(I2S_NUM_0,&pins));if(xTaskCreatePinnedToCore(soundTask,"speaker",3072,nullptr,2,nullptr,0)!=pdPASS)abort();
-  alarm_ota_config_t otaConfig={};otaConfig.board_id="xingzhi-cube-1.54tft-wifi";otaConfig.device_token=(const uint8_t*)token.c_str();otaConfig.device_token_length=token.length();otaConfig.quiet_window_seconds=300;otaConfig.transfer_timeout_seconds=180;otaConfig.authorize=otaAuthorize;otaConfig.read_guard=otaReadGuard;
+  alarm_ota_config_t otaConfig={};otaConfig.board_id="xingzhi-cube-1.54tft-wifi";otaConfig.device_token=(const uint8_t*)token.c_str();otaConfig.device_token_length=token.length();otaConfig.quiet_window_seconds=300;otaConfig.transfer_timeout_seconds=600;otaConfig.authorize=otaAuthorize;otaConfig.read_guard=otaReadGuard;
   ESP_ERROR_CHECK(alarm_proxy_init("100.126.226.79",8237));
   setenv("TZ","CST-8",1);tzset();WiFi.mode(WIFI_STA);WiFi.setAutoReconnect(true);if(ssid.length())WiFi.begin(ssid.c_str(),password.c_str());else startPortal();
   esp_sntp_set_time_sync_notification_cb(networkClockSynced);esp_sntp_set_sync_interval(CLOCK_SYNC_INTERVAL_MS);configTime(8*3600,0,"pool.ntp.org","time.google.com");routes();proxyStarted=alarm_proxy_start()==ESP_OK;bootMs=millis();lastPoll=millis()-POLL_MS;draw();

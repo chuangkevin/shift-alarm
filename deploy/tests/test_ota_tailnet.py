@@ -4,6 +4,10 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
+import tempfile
+import contextlib
+import io
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import ota_tailnet as ota
 
@@ -33,6 +37,30 @@ def release():
     return {'available': True, 'manifest': m}
 
 class Tests(unittest.TestCase):
+    def test_terminal_failure_does_not_retry_post(self):
+        class Ended(Fake):
+            def request(self, url, headers=None, body=None):
+                if body is not None:
+                    self.calls.append((url, body))
+                    return 'accepted'
+                return super().request(url, headers, body)
+        f = Ended()
+        with tempfile.TemporaryDirectory() as directory:
+            token = Path(directory) / 'token'; token.write_text('test-secret'); token.chmod(0o600)
+            argv = ['ota_tailnet.py', '--device', 'http://100.90.212.116',
+                    '--backend', 'http://100.126.226.79:8237', '--token-file', str(token),
+                    '--version', '0.2.8', '--start', '--power-confirmed']
+            with patch.object(sys, 'argv', argv), patch.object(ota, 'Client', return_value=f), \
+                 patch.object(ota.time, 'sleep'), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(ValueError, 'ended update'):
+                    ota.main()
+        self.assertEqual(sum(body is not None for _, body in f.calls), 1)
+
+    def test_wait_bounds(self):
+        self.assertEqual(ota.wait_seconds('900'), 900)
+        for value in ('59', '1801'):
+            with self.assertRaises(ota.argparse.ArgumentTypeError): ota.wait_seconds(value)
+
     def test_urls(self):
         self.assertEqual(ota.tailnet_url('http://100.90.212.116'), 'http://100.90.212.116')
         for url in ['http://192.168.18.160', 'http://localhost', 'https://100.90.212.116',

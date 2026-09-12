@@ -107,12 +107,20 @@ def verify_after(after, before, native, device, backend):
             and 'http://' + native.get('ip', '') == device)
 
 
+def wait_seconds(value):
+    seconds = int(value)
+    if not 60 <= seconds <= 1800:
+        raise argparse.ArgumentTypeError('Wait must be 60..1800 seconds')
+    return seconds
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--device', required=True, type=tailnet_url)
     parser.add_argument('--backend', required=True, type=tailnet_url)
     parser.add_argument('--token-file', required=True, type=Path)
     parser.add_argument('--version', required=True)
+    parser.add_argument('--wait-seconds', type=wait_seconds, default=900)
     parser.add_argument('--start', action='store_true')
     parser.add_argument('--power-confirmed', action='store_true')
     args = parser.parse_args()
@@ -131,12 +139,17 @@ def main():
     headers['Content-Type'] = 'application/x-www-form-urlencoded'
     # Never retry this mutation: an ambiguous response requires read-only inspection.
     client.request(args.device + '/api/update/start', headers, b'power_confirmed=1')
-    deadline = time.monotonic() + 240
+    deadline = time.monotonic() + args.wait_seconds
     while time.monotonic() < deadline:
         time.sleep(5)
         try:
             after = client.get(args.device + '/api/status')
             if after.get('version') != args.version:
+                progress = client.get(args.device + '/api/update', headers)
+                if progress.get('busy') is False:
+                    raise ValueError('Device ended update without target version; inspect /update')
+                if type(progress.get('received')) is int and type(progress.get('total')) is int:
+                    print('Download bytes:', progress['received'], '/', progress['total'])
                 continue
             page = client.request(args.device + '/update')
             nonce = re.search(r"const nonce='([0-9a-f]{32})'", page)
@@ -151,7 +164,7 @@ def main():
             return
         except (OSError, json.JSONDecodeError):
             continue
-    raise ValueError('Update not verified within 240 seconds; do not automatically retry or flash')
+    raise ValueError('Update not verified within configured wait; do not automatically retry or flash')
 
 
 if __name__ == '__main__':
