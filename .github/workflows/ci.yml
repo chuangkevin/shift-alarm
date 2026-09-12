@@ -1,0 +1,24 @@
+name: Verify
+on: [push, pull_request]
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - run: node --check static/app.js
+      - run: docker build -t shift-alarm:check .
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install platformio
+      - run: c++ -std=c++17 firmware/test/scheduler_test.cpp -o /tmp/shift-alarm-test && /tmp/shift-alarm-test
+      - run: pio run -d firmware

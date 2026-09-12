@@ -1,0 +1,22 @@
+name: shift-alarm
+services:
+  shift-alarm:
+    build: ..
+    image: shift-alarm:0.1.0
+    container_name: shift-alarm
+    restart: unless-stopped
+    env_file: ../.env
+    ports:
+      - "192.168.18.31:8237:8237"
+      - "100.126.226.79:8237:8237"
+    volumes:
+      - ../data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8237/api/health',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
