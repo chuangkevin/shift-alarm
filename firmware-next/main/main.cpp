@@ -56,6 +56,11 @@ uint32_t tailnetAttempt=0;
 extern "C" bool verifyRollbackLater(){return true;}
 
 String revision, backend, token, manageUrl, ssid, password, apPassword;
+String activeBackend() {
+  if(backend=="http://100.126.226.79:8237")return String("http://")+alarm_proxy_backend_host()+":8237";
+  return backend;
+}
+
 int64_t handled=0,snooze=0;
 volatile bool ringing=false;
 volatile uint32_t buttonEvents=0,physicalStopDown=0,lastPlusPress=0;
@@ -288,7 +293,7 @@ void otaWorker(void*){
   alarm_ota_handle_t handle=0;HTTPClient h;esp_err_t err=ESP_FAIL;
   do{
     otaMessageSet("正在檢查更新版本");
-    h.setConnectTimeout(3000);h.setTimeout(5000);h.begin(backend+"/api/device/update");h.addHeader("Authorization",String("Bearer ")+token);
+    h.setConnectTimeout(3000);h.setTimeout(5000);h.begin(activeBackend()+"/api/device/update");h.addHeader("Authorization",String("Bearer ")+token);
     if(h.GET()!=200){otaMessageSet("無法取得更新資訊");break;}
     String manifestBody;if(!boundedHttpBody(h,4096,manifestBody,5000)){otaMessageSet("更新資訊大小無效或傳輸不完整");break;}
     JsonDocument d;if(deserializeJson(d,manifestBody)){otaMessageSet("更新資訊格式無效");break;}h.end();
@@ -298,7 +303,7 @@ void otaWorker(void*){
     if(strlen(board)>=sizeof(manifest.board)||strlen(version)>=sizeof(manifest.version)||strlen(sha)!=64||strlen(mac)!=64||!m["size"].is<uint32_t>()){otaMessageSet("更新資訊格式無效");break;}
     strlcpy(manifest.board,board,sizeof(manifest.board));strlcpy(manifest.version,version,sizeof(manifest.version));strlcpy(manifest.sha256,sha,sizeof(manifest.sha256));strlcpy(manifest.hmac_sha256,mac,sizeof(manifest.hmac_sha256));manifest.size=m["size"];
     err=alarm_ota_begin(&manifest,&otaSession,&handle);if(err!=ESP_OK){otaMessageSet("更新遭拒：請確認版本、排程與電源");break;}
-    h.begin(backend+"/api/device/firmware/"+manifest.sha256+".bin");h.addHeader("Authorization",String("Bearer ")+token);
+    h.begin(activeBackend()+"/api/device/firmware/"+manifest.sha256+".bin");h.addHeader("Authorization",String("Bearer ")+token);
     if(h.GET()!=200||h.getSize()!=int(manifest.size)){otaMessageSet("更新檔大小或回應不正確");break;}
     auto *stream=h.getStreamPtr();uint8_t buffer[4096];size_t received=0;uint32_t started=millis();bool failed=false;
     otaMessageSet("正在下載並驗證，請保持供電");
@@ -351,7 +356,7 @@ async function refresh(){try{const r=await fetch('/api/tailnet',{headers:{'X-Set
 document.querySelector('#join').onsubmit=async(e)=>{e.preventDefault();try{const r=await fetch('/api/tailnet/join',{method:'POST',headers:{'X-Setup-Nonce':nonce}});statusEl.textContent=r.ok?'正在準備 Tailscale 授權…':await r.text();}catch(e){statusEl.textContent='Tailscale 授權請求失敗，請確認仍連上裝置網路，再重試。'}};refresh();setInterval(refresh,3000);
 </script>)HTML";page.replace("NONCE",setupNonce);server.send(200,"text/html; charset=utf-8",devicePage(page));
   });
-  server.on("/api/tailnet",HTTP_GET,[]{if(!localNonce())return;alarm_tailnet_status_t t={};alarm_tailnet_get_status(&t);JsonDocument d;d["label"]=tailnetLabel(t.state);d["connected"]=t.state==ALARM_TAILNET_CONNECTED;d["detail"]=tailnetDetail(t);d["ip"]=t.ip;d["expires_at"]=t.expires_at;d["auth_url"]=t.auth_url;d["acl_ready"]=t.acl_ready;d["peer_count"]=t.peer_count;d["peer_capacity"]=t.peer_capacity;d["derp_home_connected"] = t.derp_home_connected;d["derp_home_region"] = t.derp_home_region;d["derp_remote_connected"] = t.derp_remote_connected;d["derp_frames_tx"] = t.derp_frames_tx;d["derp_frames_rx"] = t.derp_frames_rx;d["derp_connect_failures"] = t.derp_connect_failures;d["derp_capacity_drops"] = t.derp_capacity_drops;d["derp_queue_drops"] = t.derp_queue_drops;d["derp_route_drops"] = t.derp_route_drops;d["wg_netif_ip"] = t.wg_netif_ip;d["wg_netif_mask"] = t.wg_netif_mask;d["wg_netif_index"] = t.wg_netif_index;d["wg_netif_up"] = t.wg_netif_up;d["wg_netif_link_up"] = t.wg_netif_link_up;d["wg_peer_count"] = t.wg_peer_count;d["wg_sessions"] = t.wg_sessions;d["wg_out_packets"] = t.wg_out_packets;d["wg_out_dropped"] = t.wg_out_dropped;d["wg_last_out_src"] = t.wg_last_out_src;d["wg_last_out_dst"] = t.wg_last_out_dst;d["wg_lookup_misses"] = t.wg_lookup_misses;d["wg_derp_enqueue"] = t.wg_derp_enqueue;d["wg_derp_enqueue_fail"] = t.wg_derp_enqueue_fail;d["wg_udp_tx"] = t.wg_udp_tx;d["wg_rx_packets"] = t.wg_rx_packets;d["wg_in_packets"] = t.wg_in_packets;d["wg_in_dropped"] = t.wg_in_dropped;if(t.capacity_exceeded)d["label"]="Tailscale裝置數超過容量，請更新韌體";String out;serializeJson(d,out);server.sendHeader("Cache-Control","no-store");server.send(200,"application/json",out);});
+  server.on("/api/tailnet",HTTP_GET,[]{if(!localNonce())return;alarm_tailnet_status_t t={};alarm_tailnet_get_status(&t);JsonDocument d;d["label"]=tailnetLabel(t.state);d["connected"]=t.state==ALARM_TAILNET_CONNECTED;d["detail"]=tailnetDetail(t);d["ip"]=t.ip;d["expires_at"]=t.expires_at;d["auth_url"]=t.auth_url;d["acl_ready"]=t.acl_ready;d["peer_count"]=t.peer_count;d["peer_capacity"]=t.peer_capacity;d["derp_home_connected"] = t.derp_home_connected;d["derp_home_region"] = t.derp_home_region;d["derp_remote_connected"] = t.derp_remote_connected;d["derp_frames_tx"] = t.derp_frames_tx;d["derp_frames_rx"] = t.derp_frames_rx;d["derp_connect_failures"] = t.derp_connect_failures;d["derp_capacity_drops"] = t.derp_capacity_drops;d["derp_queue_drops"] = t.derp_queue_drops;d["derp_route_drops"] = t.derp_route_drops;d["wg_netif_ip"] = t.wg_netif_ip;d["wg_netif_mask"] = t.wg_netif_mask;d["wg_netif_index"] = t.wg_netif_index;d["wg_netif_up"] = t.wg_netif_up;d["wg_netif_link_up"] = t.wg_netif_link_up;d["wg_peer_count"] = t.wg_peer_count;d["wg_sessions"] = t.wg_sessions;d["wg_out_packets"] = t.wg_out_packets;d["wg_out_dropped"] = t.wg_out_dropped;d["wg_last_out_src"] = t.wg_last_out_src;d["wg_last_out_dst"] = t.wg_last_out_dst;d["wg_lookup_misses"] = t.wg_lookup_misses;d["wg_derp_enqueue"] = t.wg_derp_enqueue;d["wg_derp_enqueue_fail"] = t.wg_derp_enqueue_fail;d["wg_udp_tx"] = t.wg_udp_tx;d["wg_rx_packets"] = t.wg_rx_packets;d["wg_in_packets"] = t.wg_in_packets;d["wg_in_dropped"] = t.wg_in_dropped;d["coord_stage"]=t.coord_stage;d["coord_last_reason"]=t.coord_last_reason;d["coord_reconnects"]=t.coord_reconnects;d["coord_successes"]=t.coord_successes;d["coord_stage_since_ms"]=t.coord_stage_since_ms;d["coord_last_failure_ms"]=t.coord_last_failure_ms;d["policy_ready"]=t.policy_ready;d["peers_ready"]=t.peers_ready;d["node_authorized"]=t.node_authorized;d["peer_generation"]=t.peer_generation;if(t.capacity_exceeded)d["label"]="Tailscale裝置數超過容量，請更新韌體";String out;serializeJson(d,out);server.sendHeader("Cache-Control","no-store");server.send(200,"application/json",out);});
   server.on("/api/tailnet/join",HTTP_POST,[]{if(!localNonce())return;if(!WiFi.isConnected()||!clockValid()){server.send(409,"text/plain; charset=utf-8","請先連上無線網路並完成校時");return;}esp_err_t e=tailnetStarted?alarm_tailnet_reauth():alarm_tailnet_start(apName.c_str());if(e==ESP_OK){tailnetStarted=true;tailnetAttempt=millis();}server.send(e==ESP_OK?202:503,"text/plain; charset=utf-8",e==ESP_OK?"等待 Tailscale 官方授權":"無法啟動Tailscale，請稍後重試");});
 }
 bool allowedDeviceHost(const String &host){
@@ -428,12 +433,12 @@ void routes() {
 void pollBackend() {
   if(localSchedule){syncState="班表已儲存";return;}
   if(!WiFi.isConnected()||backend.isEmpty()||token.isEmpty())return;
-  HTTPClient h; h.setConnectTimeout(1500);h.setTimeout(2000);h.begin(backend+"/api/device/schedule");h.addHeader("Authorization",String("Bearer ")+token);
+  HTTPClient h; h.setConnectTimeout(1500);h.setTimeout(2000);h.begin(activeBackend()+"/api/device/schedule");h.addHeader("Authorization",String("Bearer ")+token);
   int code=h.GET(); if(code==200){String err,body;if(!boundedHttpBody(h,MAX_JSON,body,8000))syncState="班表大小無效或傳輸不完整";else if(applySchedule(body,true,err))syncState="班表已同步";else syncState=err;}else syncState=String("同步失敗，回應碼 ")+code;h.end();
   JsonDocument d;d["revision"]=revision;d["status"]=ringing?"ringing":(clockValid()?"ready":"waiting_for_time");d["ip"]=WiFi.localIP().toString();
   int64_t next=INT64_MAX;for(auto &a:alarms)if(alarmclock::upcoming(a.epoch,time(nullptr),handled)&&a.epoch<next)next=a.epoch;
   if(next!=INT64_MAX)d["next_alarm"]=next;
-  String body;serializeJson(d,body);h.begin(backend+"/api/device/heartbeat");h.addHeader("Authorization",String("Bearer ")+token);h.addHeader("Content-Type","application/json");h.POST(body);h.end();
+  String body;serializeJson(d,body);h.begin(activeBackend()+"/api/device/heartbeat");h.addHeader("Authorization",String("Bearer ")+token);h.addHeader("Content-Type","application/json");h.POST(body);h.end();
 }
 void setup() {
   rtc_gpio_hold_dis(GPIO_NUM_21);rtc_gpio_init(GPIO_NUM_21);rtc_gpio_set_direction(GPIO_NUM_21,RTC_GPIO_MODE_OUTPUT_ONLY);rtc_gpio_set_level(GPIO_NUM_21,1); // Match the verified upstream board power control.

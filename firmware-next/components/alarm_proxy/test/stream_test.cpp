@@ -17,7 +17,7 @@ static void scenario(bool upload, bool informational, bool fragmented, bool chun
     sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);addr.sin_port=0;
     assert(bind(listener_fd,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))==0);assert(listen(listener_fd,1)==0);
     socklen_t len=sizeof(addr);assert(getsockname(listener_fd,reinterpret_cast<sockaddr*>(&addr),&len)==0);
-    upstream=addr;authority="127.0.0.1:"+std::to_string(ntohs(addr.sin_port));
+    upstream=addr;upstream_host="127.0.0.1";authority="127.0.0.1:"+std::to_string(ntohs(addr.sin_port));
     enabled=true;unsigned epoch=generation.fetch_add(1)+1;bound_ip=htonl(INADDR_LOOPBACK);
     int pair[2];assert(socketpair(AF_UNIX,SOCK_STREAM,0,pair)==0);timeouts(pair[0]);timeouts(pair[1]);
     Session session{pair[1],epoch,bound_ip.load(),esp_timer_get_time()+3LL*1000000};
@@ -62,6 +62,13 @@ static void local_route(){
 }
 int main() {
     std::signal(SIGPIPE,SIG_IGN);
+    assert(alarm_proxy_init("100.126.226.79",8237)==ESP_OK);
+    assert(std::string(alarm_proxy_backend_host())=="100.126.226.79");
+    test_net_up=true;test_ip.ip.addr=inet_addr("192.168.18.160");test_ip.netmask.addr=inet_addr("255.255.255.0");
+    assert(std::string(alarm_proxy_backend_host())=="192.168.18.31");
+    test_ip.ip.addr=inet_addr("192.168.19.160");
+    assert(std::string(alarm_proxy_backend_host())=="100.126.226.79");
+    test_net_up=false;
     local_route();
     scenario(false,false,false,false);
     scenario(false,true,true,false);
