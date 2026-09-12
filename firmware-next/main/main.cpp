@@ -190,10 +190,18 @@ void soundTask(void*) {
 }
 void startRing(String label) { ringLabel=label; ringStarted=millis(); ringing=true; Serial.println("ALARM_RING_STARTED"); }
 void stopRing(bool doSnooze) { ringing=false; snooze=doSnooze&&clockValid()?time(nullptr)+alarmclock::SNOOZE_SECONDS:0; prefs.putLong64("snooze",snooze); Serial.println(doSnooze?"ALARM_SNOOZED":"ALARM_STOPPED"); }
+#include "calendar_metadata.h"
+JsonDocument calendarMonths;
 bool applySchedule(const String &body,bool persist,String &error) {
   if(body.length()>MAX_JSON){error="班表資料過大";return false;}
   JsonDocument doc; if(deserializeJson(doc,body)){error="資料格式無效";return false;}
   if(!doc["revision"].is<String>()||doc["revision"].as<String>().isEmpty()||doc["timezone"]!="Asia/Taipei"||!doc["alarms"].is<JsonArray>()||doc["alarms"].size()>MAX_ALARMS){error="班表欄位不完整";return false;}
+  JsonDocument nextMonths;
+  if(doc.as<JsonObjectConst>().containsKey("months")){
+    if(!localcalendar::validMonths(doc["months"])) {error="月份設定格式無效或超過 120 個月";return false;}
+    nextMonths.set(doc["months"]);
+  }else nextMonths.to<JsonObject>();
+  if(nextMonths.overflowed()){error="月份設定記憶體不足";return false;}
   std::vector<Alarm> next;
   for(JsonObject a:doc["alarms"].as<JsonArray>()) {
     if(!a["id"].is<String>()||a["id"].as<String>().isEmpty()||a["id"].as<String>().length()>128||!a["epoch"].is<int64_t>()||a["epoch"].as<int64_t>()<alarmclock::VALID_CLOCK||!a["label"].is<String>()||a["label"].as<String>().length()>256){error="鬧鐘資料無效";return false;}
@@ -201,8 +209,11 @@ bool applySchedule(const String &body,bool persist,String &error) {
     next.push_back({a["id"].as<String>(),a["label"].as<String>(),a["epoch"].as<int64_t>()});
   }
   std::sort(next.begin(),next.end(),[](const Alarm&a,const Alarm&b){return a.epoch<b.epoch;});
-  JsonDocument saved;saved["revision"]=doc["revision"];saved["timezone"]=doc["timezone"];saved["alarms"]=doc["alarms"];String canonical;serializeJson(saved,canonical);
+  JsonDocument saved;saved["revision"]=doc["revision"];saved["timezone"]=doc["timezone"];saved["alarms"]=doc["alarms"];saved["months"]=nextMonths;String canonical;serializeJson(saved,canonical);
+  if(saved.overflowed()||canonical.length()>MAX_JSON){error="班表資料過大";return false;}
   if(persist&&savedSchedule()!=canonical&&prefs.putBytes("schedule",canonical.c_str(),canonical.length())!=canonical.length()){error="儲存失敗";return false;}
+  if(persist&&savedSchedule()!=canonical){error="儲存驗證失敗，請重試";return false;}
+  calendarMonths=std::move(nextMonths);
   alarms=std::move(next);revision=doc["revision"].as<String>();
   // Authenticated LAN server also provides time if outbound NTP is unavailable.
   if(persist && doc["server_time"].is<int64_t>() && doc["server_time"].as<int64_t>()>=alarmclock::VALID_CLOCK) {
