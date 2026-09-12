@@ -32,6 +32,7 @@
 #include "esp_sntp.h"
 #include "zh_glyphs.h"
 #include "clock_page.h"
+#include "screen_policy.h"
 
 const char *const VERSION=esp_app_get_description()->version;
 constexpr size_t MAX_ALARMS=512, MAX_JSON=98304;
@@ -61,7 +62,7 @@ int64_t handled=0,snooze=0;
 volatile bool ringing=false;
 volatile uint32_t buttonEvents=0,physicalStopDown=0,lastPlusPress=0;
 portMUX_TYPE buttonMux=portMUX_INITIALIZER_UNLOCKED;
-void IRAM_ATTR stopPressed(){portENTER_CRITICAL_ISR(&buttonMux);buttonEvents|=1;physicalStopDown=xTaskGetTickCountFromISR()*portTICK_PERIOD_MS;ringing=false;portEXIT_CRITICAL_ISR(&buttonMux);}
+void IRAM_ATTR stopPressed(){portENTER_CRITICAL_ISR(&buttonMux);buttonEvents|=ringing?8:1;physicalStopDown=xTaskGetTickCountFromISR()*portTICK_PERIOD_MS;ringing=false;portEXIT_CRITICAL_ISR(&buttonMux);}
 void IRAM_ATTR snoozePressed(){portENTER_CRITICAL_ISR(&buttonMux);buttonEvents|=ringing?8:2;ringing=false;portEXIT_CRITICAL_ISR(&buttonMux);}
 void IRAM_ATTR plusPressed(){portENTER_CRITICAL_ISR(&buttonMux);uint32_t now=xTaskGetTickCountFromISR()*portTICK_PERIOD_MS;if(now-lastPlusPress>=200){lastPlusPress=now;buttonEvents|=ringing?8:4;ringing=false;}portEXIT_CRITICAL_ISR(&buttonMux);}
 uint32_t ringStarted=0,lastPoll=0,lastDraw=0,lastSerial=0,bootMs=0;
@@ -79,8 +80,43 @@ Adafruit_SSD1306 screen(128,64,&Wire,-1);
 #endif
 
 uint8_t displayRotation=0;
+uint16_t screenTimeoutMinutes=0;
+bool screenAwake=true;
+uint32_t screenLastActivity=0;
 bool forceDraw=true;
 uint32_t previousFrameHash=0;
+
+constexpr char DISPLAY_SETTINGS_KEY[]="display-v1";
+bool saveDisplaySettings(uint8_t rotation,uint16_t timeoutMinutes){
+  if(rotation>3||!screenpolicy::validTimeout(timeoutMinutes))return false;
+  const uint8_t blob[]={ 'D',1,rotation,uint8_t(timeoutMinutes),uint8_t(timeoutMinutes>>8) };
+  if(prefs.putBytes(DISPLAY_SETTINGS_KEY,blob,sizeof(blob))!=sizeof(blob)||prefs.getBytesLength(DISPLAY_SETTINGS_KEY)!=sizeof(blob))return false;
+  uint8_t verified[sizeof(blob)]={};
+  return prefs.getBytes(DISPLAY_SETTINGS_KEY,verified,sizeof(verified))==sizeof(verified)&&memcmp(blob,verified,sizeof(blob))==0;
+}
+void loadDisplaySettings(){
+  displayRotation=prefs.getUChar("rotation",prefs.getBool("flipped",false)?2:0)%4;
+  screenTimeoutMinutes=0;
+  if(prefs.isKey(DISPLAY_SETTINGS_KEY)){
+    uint8_t blob[5]={};
+    if(prefs.getBytesLength(DISPLAY_SETTINGS_KEY)==sizeof(blob)&&prefs.getBytes(DISPLAY_SETTINGS_KEY,blob,sizeof(blob))==sizeof(blob)&&
+       blob[0]=='D'&&blob[1]==1&&blob[2]<=3){
+      uint16_t timeout=uint16_t(blob[3])|(uint16_t(blob[4])<<8);
+      if(screenpolicy::validTimeout(timeout)){displayRotation=blob[2];screenTimeoutMinutes=timeout;}
+    }
+  }else saveDisplaySettings(displayRotation,screenTimeoutMinutes);
+}
+void setScreenAwake(bool awake){
+  if(screenAwake==awake)return;
+#if CUBE_TFT
+  if(awake){screen.enableDisplay(true);digitalWrite(13,HIGH);}else{digitalWrite(13,LOW);screen.enableDisplay(false);}
+#else
+  screen.ssd1306_command(awake?SSD1306_DISPLAYON:SSD1306_DISPLAYOFF);
+#endif
+  screenAwake=awake;
+  if(awake){forceDraw=true;previousFrameHash=0;}
+}
+void wakeScreen(){screenLastActivity=millis();setScreenAwake(true);}
 
 constexpr char WIFI_CREDENTIALS_KEY[]="wifi-v1";
 constexpr size_t WIFI_BLOB_HEADER=5, WIFI_BLOB_MAX=WIFI_BLOB_HEADER+32+63;
@@ -145,6 +181,7 @@ void line(int x,int y,String s,int size=1) {
 }
 String tailnetLabel(alarm_tailnet_state_t state);
 void draw() {
+  if(!screenAwake)return;
   fill(ringing && (millis()/500)%2 ? 0x7800 : 0); surface.setTextColor(0xffff);
 #if CUBE_TFT
   line(8,4,"班表鬧鐘",2); line(8,31,pairingHoldActive?String("配網倒數 ")+String(10-(millis()-pairingHoldStarted)/1000):clockValid()?datetime(time(nullptr)):"等待校時",2);
@@ -194,7 +231,7 @@ void soundTask(void*) {
     if(result==ESP_OK&&written==sizeof(samples))speakerReady=true;
   }
 }
-void startRing(String label) { ringLabel=label; ringStarted=millis(); ringing=true; Serial.println("ALARM_RING_STARTED"); }
+void startRing(String label) { ringLabel=label; ringStarted=millis(); ringing=true; wakeScreen(); Serial.println("ALARM_RING_STARTED"); }
 void stopRing(bool doSnooze) { ringing=false; snooze=doSnooze&&clockValid()?time(nullptr)+alarmclock::SNOOZE_SECONDS:0; prefs.putLong64("snooze",snooze); Serial.println(doSnooze?"ALARM_SNOOZED":"ALARM_STOPPED"); }
 #include "calendar_metadata.h"
 JsonDocument calendarMonths;
@@ -235,7 +272,7 @@ bool applySchedule(const String &body,bool persist,String &error) {
   return true;
 }
 bool authorized() { if(token.length()&&server.header("Authorization")==String("Bearer ")+token)return true; server.send(401,"application/json","{\"error\":\"需要裝置授權\"}");return false; }
-void startPortal() { if(portal)return;portal=true; WiFi.mode(WIFI_AP_STA); WiFi.softAP(apName.c_str(),apPassword.c_str());dns.start(53,"*",WiFi.softAPIP());WiFi.scanNetworks(true); Serial.println("SETUP_AP_STARTED");Serial.println(String("SETUP_AP_SSID ")+apName);Serial.println("SETUP_URL http://192.168.4.1"); }
+void startPortal() { wakeScreen();if(portal)return;portal=true; WiFi.mode(WIFI_AP_STA); WiFi.softAP(apName.c_str(),apPassword.c_str());dns.start(53,"*",WiFi.softAPIP());WiFi.scanNetworks(true); Serial.println("SETUP_AP_STARTED");Serial.println(String("SETUP_AP_SSID ")+apName);Serial.println("SETUP_URL http://192.168.4.1"); }
 String devicePage(String content) {
   int styleEnd=content.indexOf("</style>");
   if(styleEnd>=0)content=content.substring(styleEnd+8);
@@ -258,7 +295,7 @@ bool otaAuthorize(const void *request,void*){return request==&otaSession&&otaBus
 esp_err_t otaReadGuard(alarm_ota_guard_t *out,void*){portENTER_CRITICAL(&otaMux);*out=otaGuard;portEXIT_CRITICAL(&otaMux);out->operator_confirmed_power=otaPowerConfirmed.load();out->ringing=ringing;out->now_epoch=time(nullptr);return ESP_OK;}
 void refreshOtaGuard(){alarm_ota_guard_t g={};g.clock_valid=clockValid();g.ringing=ringing;g.snoozed=snooze>0;g.schedule_ready=!revision.isEmpty();g.now_epoch=time(nullptr);int64_t next=snooze>0?snooze:INT64_MAX;for(auto &a:alarms)if(alarmclock::upcoming(a.epoch,g.now_epoch,handled)&&a.epoch<next)next=a.epoch;g.next_alarm_epoch=next==INT64_MAX?0:next;portENTER_CRITICAL(&otaMux);otaGuard=g;portEXIT_CRITICAL(&otaMux);}
 esp_err_t otaDiagnostics(void*){
-  if(!frame||!frame->getBuffer()||!prefs.isKey("ap-pass")||!savedScheduleRestored||
+  if(!frame||!frame->getBuffer()||!prefs.isKey("ap-pass")||!prefs.isKey(DISPLAY_SETTINGS_KEY)||!savedScheduleRestored||
      !deviceRoutesReady||ESP.getPsramSize()<8*1024*1024||WiFi.getMode()==WIFI_OFF)return ESP_FAIL;
   const uint32_t started=millis();
   while(!speakerReady.load()&&millis()-started<1000)vTaskDelay(pdMS_TO_TICKS(10));
@@ -383,17 +420,23 @@ void routes() {
   });
   const char *headers[]={"Authorization","X-Setup-Nonce"}; server.collectHeaders(headers,2);tailnetRoutes();otaRoutes();localCalendarRoutes();
   server.on("/api/clock",HTTP_GET,[]{JsonDocument d;d["ready"]=clockValid();d["last_sync"]=lastNetworkClock.load();d["interval_seconds"]=CLOCK_SYNC_INTERVAL_MS/1000;d["overdue"]=lastNetworkClock.load()?millis()-lastNetworkClockMs.load()>CLOCK_SYNC_INTERVAL_MS+300000:millis()-bootMs>120000;String out;serializeJson(d,out);server.send(200,"application/json",out);});
-  server.on("/api/status",HTTP_GET,[]{ JsonDocument d; d["version"]=VERSION;d["backendTransport"]=backend=="http://100.126.226.79:8237"?"tailscale":"unsupported";d["backendHost"]=backend=="http://100.126.226.79:8237"?"100.126.226.79":"";d["localSchedule"]=localSchedule;d["rotation"]=displayRotation*90; d["revision"]=revision;d["clockReady"]=clockValid();d["epoch"]=time(nullptr);d["ringing"]=ringing;d["wifi"]=WiFi.isConnected();d["alarmCount"]=alarms.size();d["sync"]=syncState;String out;serializeJson(d,out);server.send(200,"application/json",out); });
+  server.on("/api/status",HTTP_GET,[]{ JsonDocument d; d["version"]=VERSION;d["backendTransport"]=backend=="http://100.126.226.79:8237"?"tailscale":"unsupported";d["backendHost"]=backend=="http://100.126.226.79:8237"?"100.126.226.79":"";d["localSchedule"]=localSchedule;d["rotation"]=displayRotation*90;d["screenTimeoutMinutes"]=screenTimeoutMinutes;d["screenAwake"]=screenAwake; d["revision"]=revision;d["clockReady"]=clockValid();d["epoch"]=time(nullptr);d["ringing"]=ringing;d["wifi"]=WiFi.isConnected();d["alarmCount"]=alarms.size();d["sync"]=syncState;String out;serializeJson(d,out);server.send(200,"application/json",out); });
   server.on("/display",HTTP_GET,[]{
-    String page=String("<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>裝置設定</title><style>body{font:20px system-ui;padding:24px}button,select{font:20px system-ui;padding:12px;margin:12px 0}</style><h1>裝置設定</h1><a class='primary-link' href='/calendar'>設定班表與鬧鐘</a><h2>螢幕方向</h2><form method='post' action='/display'><input type='hidden' name='nonce' value='")+setupNonce+"'><select name='rotation'>";
+    String page=String("<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>裝置設定</title><style>body{font:20px system-ui;padding:24px}button,select{font:20px system-ui;padding:12px;margin:12px 0}</style><h1>裝置設定</h1><a class='primary-link' href='/calendar'>設定班表與鬧鐘</a><h2>螢幕</h2><form method='post' action='/display'><input type='hidden' name='nonce' value='")+setupNonce+"'><label for='rotation'>顯示方向</label><select id='rotation' name='rotation'>";
     for(int r=0;r<4;r++)page+=String("<option value='")+r+"'"+(displayRotation==r?" selected":"")+">"+r*90+"°"+(r==0?"（正常）":r==2?"（上下顛倒）":"")+"</option>";
-    page+="</select><br><button>儲存方向</button></form><p>鬧鐘響時，按任一實體按鈕即可停止。</p><h2>時鐘校對</h2><p>每三小時自動透過網路校時，重新開機及恢復網路後也會由網路時間服務重試。</p><a href='/clock'>手動調整時鐘</a><p id='clock-status'>正在讀取校時狀態…</p><script>async function clockStatus(){const el=document.querySelector('#clock-status');try{const r=await fetch('/api/clock');if(!r.ok)throw Error();const d=await r.json();el.textContent=d.last_sync?'最近網路校時：'+new Date(d.last_sync*1000).toLocaleString('zh-TW')+(d.overdue?'。校時已逾期，請檢查網際網路連線。':'。每三小時自動校對。'):d.overdue?'網路校時尚未成功，請檢查網際網路連線，或到班表頁使用手機校時。':'等待首次網路校時…';}catch(e){el.textContent='無法取得校時狀態，請確認裝置連線。'}}clockStatus();setInterval(clockStatus,10000)</script><h2>韌體更新</h2><p>下載已發布版本，保留舊版供失敗時回復。</p><a href='/update'>檢查裝置更新</a><h2>Tailscale連線</h2><p>登入授權，讓裝置在不同環境仍能同步班表。</p><a href='/tailnet'>設定Tailscale</a><h2>更換無線網路</h2><p>按下後裝置會開啟配網熱點，掃描螢幕條碼即可重新選擇網路。原設定會保留到新網路連線成功。</p><form method='post' action='/wifi/reset'><input type='hidden' name='nonce' value='"+setupNonce+"'><button>重新設定無線網路</button></form><p>無法連上此頁時，可同時按住「＋」與「－」十秒，啟動配網。</p><a href='/'>返回</a>";
+    page+="</select><label for='screen-timeout'>閒置多久後關閉螢幕</label><select id='screen-timeout' name='screen_timeout'>";
+    const uint16_t timeouts[]={0,1,5,15,30,60};
+    for(uint16_t minutes:timeouts)page+=String("<option value='")+minutes+"'"+(screenTimeoutMinutes==minutes?" selected":"")+">"+(minutes?String(minutes)+" 分鐘":"永久開啟")+"</option>";
+    page+="</select><button>儲存螢幕設定</button></form><p>非響鈴時短按機殼頂部中間按鈕可立即關屏；關屏後按任一按鈕即可喚醒。鬧鐘到點會自動亮屏並正常響鈴，響鈴時按任一按鈕即可停止。</p><h2>時鐘校對</h2><p>每三小時自動透過網路校時，重新開機及恢復網路後也會由網路時間服務重試。</p><a href='/clock'>手動調整時鐘</a><p id='clock-status'>正在讀取校時狀態…</p><script>async function clockStatus(){const el=document.querySelector('#clock-status');try{const r=await fetch('/api/clock');if(!r.ok)throw Error();const d=await r.json();el.textContent=d.last_sync?'最近網路校時：'+new Date(d.last_sync*1000).toLocaleString('zh-TW')+(d.overdue?'。校時已逾期，請檢查網際網路連線。':'。每三小時自動校對。'):d.overdue?'網路校時尚未成功，請檢查網際網路連線，或到班表頁使用手機校時。':'等待首次網路校時…';}catch(e){el.textContent='無法取得校時狀態，請確認裝置連線。'}}clockStatus();setInterval(clockStatus,10000)</script><h2>韌體更新</h2><p>下載已發布版本，保留舊版供失敗時回復。</p><a href='/update'>檢查裝置更新</a><h2>Tailscale連線</h2><p>登入授權，讓裝置在不同環境仍能同步班表。</p><a href='/tailnet'>設定Tailscale</a><h2>更換無線網路</h2><p>按下後裝置會開啟配網熱點，掃描螢幕條碼即可重新選擇網路。原設定會保留到新網路連線成功。</p><form method='post' action='/wifi/reset'><input type='hidden' name='nonce' value='"+setupNonce+"'><button>重新設定無線網路</button></form><p>無法連上此頁時，可同時按住「＋」與「－」十秒，啟動配網。</p><a href='/'>返回</a>";
     server.send(200,"text/html; charset=utf-8",devicePage(page));
   });
   server.on("/display",HTTP_POST,[]{
     if(server.arg("nonce")!=setupNonce){server.send(403,"text/plain; charset=utf-8","請重新開啟設定頁");return;}
-    String value=server.arg("rotation");if(value!="0"&&value!="1"&&value!="2"&&value!="3"){server.send(400,"text/plain; charset=utf-8","方向設定無效");return;}
-    uint8_t requested=value.toInt();if(prefs.putUChar("rotation",requested)!=1||prefs.getUChar("rotation",255)!=requested){server.send(500,"text/plain; charset=utf-8","儲存失敗，請重試；方向尚未變更");return;}displayRotation=requested;screen.setRotation(displayRotation);forceDraw=true;
+    String value=server.arg("rotation"),timeoutValue=server.arg("screen_timeout");if(value!="0"&&value!="1"&&value!="2"&&value!="3"){server.send(400,"text/plain; charset=utf-8","方向設定無效");return;}
+    uint8_t requested=value.toInt();uint16_t requestedTimeout=timeoutValue.toInt();
+    if(String(requestedTimeout)!=timeoutValue||!screenpolicy::validTimeout(requestedTimeout)){server.send(400,"text/plain; charset=utf-8","關屏時間設定無效");return;}
+    if(!saveDisplaySettings(requested,requestedTimeout)){server.send(500,"text/plain; charset=utf-8","儲存失敗，螢幕設定尚未變更");return;}
+    displayRotation=requested;screenTimeoutMinutes=requestedTimeout;screen.setRotation(displayRotation);wakeScreen();forceDraw=true;
     server.sendHeader("Location","/display");server.send(303,"text/plain","");
   });
   server.on("/wifi/reset",HTTP_POST,[]{
@@ -461,7 +504,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(BUTTON_STOP),stopPressed,FALLING);attachInterrupt(digitalPinToInterrupt(BUTTON_SNOOZE),snoozePressed,FALLING);attachInterrupt(digitalPinToInterrupt(BUTTON_TEST),plusPressed,FALLING);
 #if CUBE_TFT
   frame=new GFXcanvas16(240,240);assert(frame && frame->getBuffer());
-  SPI.begin(9,-1,10,14);screen.init(240,240);displayRotation=prefs.getUChar("rotation",prefs.getBool("flipped",false)?2:0)%4;screen.setRotation(displayRotation);screen.invertDisplay(true);pinMode(13,OUTPUT);digitalWrite(13,HIGH);
+  SPI.begin(9,-1,10,14);screen.init(240,240);loadDisplaySettings();screen.setRotation(displayRotation);screen.invertDisplay(true);pinMode(13,OUTPUT);digitalWrite(13,HIGH);screenAwake=true;screenLastActivity=millis();
 #else
   Wire.begin(41,42);screen.begin(SSD1306_SWITCHCAPVCC,0x3c);screen.setRotation(2);
 #endif
@@ -494,15 +537,19 @@ void loop() {
   if(connecting&&ms-connectStarted>=20000){connecting=false;setupFailed=true;WiFi.disconnect(false,false);}
   if(portal&&apCloseAt&&int32_t(ms-apCloseAt)>=0){portal=false;apCloseAt=0;dns.stop();WiFi.softAPdisconnect(true);WiFi.mode(WIFI_STA);}
 
-  static uint32_t lastButtons=0;
+  static uint32_t lastButtons=0;static bool ignoreChordUntilRelease=false;
   portENTER_CRITICAL(&buttonMux);uint32_t events=buttonEvents;buttonEvents=0;portEXIT_CRITICAL(&buttonMux);
   if(ms-lastButtons<150)events&=9;else if(events)lastButtons=ms;
-  bool chord=!digitalRead(BUTTON_TEST)&&!digitalRead(BUTTON_SNOOZE);
+  bool rawChord=!digitalRead(BUTTON_TEST)&&!digitalRead(BUTTON_SNOOZE);
+  if(!rawChord)ignoreChordUntilRelease=false;
+  if(events&&!screenAwake){wakeScreen();events=0;ignoreChordUntilRelease=true;}
+  else if(events)screenLastActivity=ms;
+  bool chord=rawChord&&!ignoreChordUntilRelease;
   if(chord&&!ringing&&!portal){
     if(!pairingHoldActive&&!pairingTriggered){pairingHoldActive=true;pairingHoldStarted=ms;}
     if(pairingHoldActive&&ms-pairingHoldStarted>=10000){pairingHoldActive=false;pairingTriggered=true;apCloseAt=0;showJoinQr=true;startPortal();}
   } else {pairingHoldActive=false;if(!chord)pairingTriggered=false;}
-  if(events&9)stopRing(false);else if((events&4)&&!chord){if(portal)showJoinQr=!showJoinQr;}
+  if(events&8)stopRing(false);else if(events&1)setScreenAwake(false);else if((events&4)&&!chord){if(portal)showJoinQr=!showJoinQr;}
   if(clockValid()) {
     const int64_t corrected=alarmclock::reconcileHandled(now,handled);
     if(corrected!=handled){handled=corrected;prefs.putLong64("handled",handled);}
@@ -512,6 +559,7 @@ void loop() {
     if(snooze&&now>=snooze){bool fresh=now-snooze<=alarmclock::CATCHUP_SECONDS;snooze=0;prefs.putLong64("snooze",0);if(fresh)startRing("貪睡提醒");}
   }
   if(ringing&&millis()-ringStarted>=RING_MS)stopRing(false);
+  if(screenpolicy::shouldTurnOff(screenTimeoutMinutes,ms,screenLastActivity,ringing||portal||pairingHoldActive))setScreenAwake(false);
   // Saved networks do not reopen setup automatically; require the deliberate chord.
   if(!pairingHoldActive&&ms-lastPoll>=POLL_MS){lastPoll=ms;pollBackend();}
   // Main alone mutates schedules/snooze and selects the next boot image.

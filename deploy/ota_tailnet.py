@@ -99,6 +99,9 @@ def verify_after(after, before, native, device, backend):
     for key in ('rotation', 'localSchedule'):
         if after.get(key) != before.get(key):
             raise ValueError('Saved setting changed')
+    if ('screenTimeoutMinutes' in before
+            and after.get('screenTimeoutMinutes') != before['screenTimeoutMinutes']):
+        raise ValueError('Saved screen timeout changed')
     if before.get('localSchedule') is True:
         for key in ('revision', 'alarmCount'):
             if key not in before or after.get(key) != before[key]:
