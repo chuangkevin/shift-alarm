@@ -8,7 +8,7 @@ int xQueueSend(void *queue,const void *item,unsigned timeout){(void)queue;(void)
 static void clear(void){while(count)free(pending[--count]);}
 static bool update(microlink_t *m,const char *s){cJSON *j=cJSON_Parse(s);assert(j);bool ok=ml_peer_map_update(m,j);cJSON_Delete(j);return ok;}
 static void initial(microlink_t *m){
- const char *s="{\"Peers\":[{\"ID\":7,\"Name\":\"backend\",\"MachineAuthorized\":true,\"Key\":\"nodekey:1111111111111111111111111111111111111111111111111111111111111111\",\"DiscoKey\":\"discokey:3333333333333333333333333333333333333333333333333333333333333333\",\"Addresses\":[\"100.64.0.2/32\"],\"HomeDERP\":1}]}";
+ const char *s="{\"Peers\":[{\"ID\":7,\"Name\":\"backend\",\"Key\":\"nodekey:1111111111111111111111111111111111111111111111111111111111111111\",\"DiscoKey\":\"discokey:3333333333333333333333333333333333333333333333333333333333333333\",\"Addresses\":[\"100.64.0.2/32\"],\"HomeDERP\":1}]}";
  assert(update(m,s));
 }
 int main(void){
@@ -23,6 +23,23 @@ int main(void){
  assert(count==1&&pending[0]->action==ML_PEER_SYNC_DONE);clear();
  assert(update(&m,"{\"PeersChangedPatch\":[{\"NodeID\":7,\"KeyExpiry\":\"2020-01-01T00:00:00Z\"}]}"));
  assert(m.security.peer_count==0&&count==2&&pending[0]->action==ML_PEER_REMOVE&&pending[0]->node_id==7);clear();
+ /* Remote peer authorization comes from control's Peers membership and ACLs.
+  * Real map peers omit MachineAuthorized. Explicit false has the same remote
+  * semantics, while expiry and unsigned-only still remove network access. */
+ for(unsigned mode=0;mode<4;mode++) {
+   initial(&m);clear();
+   cJSON *root=cJSON_CreateObject(),*peers=cJSON_AddArrayToObject(root,"PeersChanged");
+   cJSON *node=cJSON_Duplicate(cJSON_GetObjectItemCaseSensitive(m.peer_map,"7"),true);
+   assert(node);cJSON_AddItemToArray(peers,node);
+   if(mode==0)cJSON_AddBoolToObject(node,"MachineAuthorized",false);
+   if(mode==1)cJSON_AddBoolToObject(node,"Expired",true);
+   if(mode==2)cJSON_AddBoolToObject(node,"UnsignedPeerAPIOnly",true);
+   if(mode==3)cJSON_AddStringToObject(node,"KeyExpiry","2020-01-01T00:00:00Z");
+   assert(ml_peer_map_update(&m,root));cJSON_Delete(root);
+   if(mode==0)assert(m.security.peer_count==1&&count==1&&pending[0]->action==ML_PEER_SYNC_DONE);
+   else assert(m.security.peer_count==0&&count==2&&pending[0]->action==ML_PEER_REMOVE);
+   clear();
+ }
  initial(&m);clear();
  assert(update(&m,"{\"PeersRemoved\":[7]}"));assert(count==2&&pending[0]->action==ML_PEER_REMOVE&&pending[0]->node_id==7&&m.security.peer_count==0);clear();
  initial(&m);clear();
@@ -34,7 +51,6 @@ int main(void){
    cJSON *root=cJSON_CreateObject(),*peers=cJSON_AddArrayToObject(root,"Peers");
    for(unsigned i=1;i<=total;i++) {
      cJSON *node=cJSON_CreateObject();cJSON_AddNumberToObject(node,"ID",i);
-     cJSON_AddBoolToObject(node,"MachineAuthorized",true);
      char key[80],ip[32];snprintf(key,sizeof(key),"nodekey:%064x",i);cJSON_AddStringToObject(node,"Key",key);
      snprintf(key,sizeof(key),"discokey:%064x",i);cJSON_AddStringToObject(node,"DiscoKey",key);
      snprintf(ip,sizeof(ip),"100.64.0.%u/32",i);cJSON *addresses=cJSON_AddArrayToObject(node,"Addresses");cJSON_AddItemToArray(addresses,cJSON_CreateString(ip));

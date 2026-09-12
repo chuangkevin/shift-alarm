@@ -34,9 +34,12 @@ static bool compile_node(cJSON *node,ml_peer_update_t *out,int64_t *expiry) {
        !key_bytes(cJSON_GetObjectItemCaseSensitive(node,"DiscoKey"),"discokey:",out->disco_key))return false;
     cJSON *ex=cJSON_GetObjectItemCaseSensitive(node,"KeyExpiry");
     *expiry=ex?ml_parse_expiry(cJSON_IsString(ex)?ex->valuestring:NULL):0;
+    /* Remote Peers membership is granted by control; MachineAuthorized is not
+     * a remote WG eligibility requirement and is normally omitted. Our own
+     * Node/RegisterResponse authorization is enforced separately by ml_security.
+     * Keep explicit peer expiry and unsigned-only restrictions fail-closed. */
     if(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(node,"Expired"))||
-       cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(node,"UnsignedPeerAPIOnly"))||
-       !cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(node,"MachineAuthorized"))) *expiry=1;
+       cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(node,"UnsignedPeerAPIOnly"))) *expiry=1;
     cJSON *addresses=cJSON_GetObjectItemCaseSensitive(node,"Addresses");
     if(!cJSON_IsArray(addresses))return false;
     cJSON *addr;cJSON_ArrayForEach(addr,addresses) {

@@ -229,3 +229,20 @@ the unsafe configuration trips UBSan, the separated slot safely ignores custom
 driver state, and a real ESP-netif fixture still receives its IP-change event.
 The compile guard is tested in both configurations. This remains a host
 regression; the corrected full firmware requires forward hardware validation.
+
+### Remote peer eligibility
+
+The 0.2.5 runtime reached the WG netif with 57 mapped peers but zero installed
+WG peers: all outgoing packets were rejected before DERP enqueue. Real control
+peer objects omit `MachineAuthorized`; requiring it to be true excluded every
+peer. Remote peers supplied by control now retain eligibility regardless of
+that field, matching the official Tailscale WG conversion. Own-node and register
+authorization, ACLs, peer expiry, and `UnsignedPeerAPIOnly` restrictions remain
+enforced. See [official WGCfg peer conversion](https://github.com/tailscale/tailscale/blob/v1.80.3/wgengine/wgcfg/nmcfg/nmcfg.go).
+
+The host peer-map regression uses omitted-field fixtures, explicit false,
+expiry and unsigned-only removal, plus 57/64-peer capacity cases. With only
+the new fixtures, the previous implementation fails its initial queued-ADD
+assertion; with the fix all four Tailnet host suites pass under UBSan.
+This identifies a pre-transport blocker; successful real TCP still requires
+validation of the forward firmware candidate.
