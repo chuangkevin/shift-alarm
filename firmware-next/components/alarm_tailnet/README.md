@@ -300,3 +300,28 @@ filter text, capabilities, keys or authentication URLs. Unsupported counts
 include unknown/deprecated fields and nonempty capability grants; multiple
 unsupported fields may belong to one rule. IPv6 selectors are not counted as
 unsupported because they correctly do not match this IPv4-only data path.
+### Control streaming framing
+
+Long-poll now retains incomplete HTTP/2 headers and payloads between Noise
+records, then assembles each stream-5 MapResponse using its official four-byte
+little-endian length. Every complete map is processed in order, including
+multiple maps per DATA frame. Other streams' DATA never contaminates the map
+body or its flow-control accounting. Padding is excluded from map bytes but
+included in flow-control bytes. PING/SETTINGS replies remain handled.
+
+Limits are 16 KiB per HTTP/2 frame (the default receive MAX_FRAME_SIZE; no
+larger size is advertised) and 256 KiB per map. Buffers allocate through the
+existing PSRAM allocator and are released on frame/map completion or reconnect,
+disconnect and shutdown. Invalid framing/JSON, allocation failure, GOAWAY,
+map-stream END_STREAM or reset trigger a fresh authoritative fetch. A failed
+long-poll request no longer falsely transitions to connected. Unknown HTTP/2
+frame types remain ignored as required by HTTP/2.
+
+The previous loop discarded frame tails and all but the last DATA payload,
+and wrote a terminator beyond a full 65536-byte receive buffer. The new parser
+provides separately allocated terminated map bodies. Host tests feed every
+chunk size across split headers/prefixes/bodies, multiple maps, other-stream
+DATA, padded DATA, invalid lengths and reconnect reset under UBSan. Run the
+microlink test/run_host_tests.sh suite. This repairs deterministic protocol
+framing defects; 0.2.7 remained connected beyond 270 seconds, so these defects
+are not asserted to explain the earlier runtime disconnection.

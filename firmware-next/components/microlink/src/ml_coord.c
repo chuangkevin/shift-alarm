@@ -22,6 +22,7 @@
  */
 
 #include "microlink_internal.h"
+#include "ml_control_stream.h"
 #include "x25519.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -1747,146 +1748,54 @@ static int do_send_endpoint_update(microlink_t *ml, ml_noise_state_t *noise) {
     return 0;
 }
 
-/* Try to read one incremental MapResponse update (non-blocking) */
-static int poll_map_update(microlink_t *ml, ml_noise_state_t *noise) {
-    /* Use select() to check if data is available before blocking in recv */
-    fd_set readfds;
-    FD_ZERO(&readfds);
-    FD_SET(ml->coord_sock, &readfds);
-    struct timeval tv = { .tv_sec = 0, .tv_usec = 50000 };  /* 50ms */
-    int sel = ml_select_fds(ml->coord_sock + 1, &readfds, NULL, NULL, &tv);
-    if (sel <= 0) return 0;  /* No data available or error */
-
-    /* Data available — set short recv timeout for partial frame safety */
-    struct timeval tv_recv = { .tv_sec = 2, .tv_usec = 0 };
-    ml_setsockopt(ml->coord_sock, SOL_SOCKET, SO_RCVTIMEO, &tv_recv, sizeof(tv_recv));
-
-    uint8_t *frame_buf = ml_psram_malloc(65536);
-    if (!frame_buf) return 0;
-
-    int frame_len = noise_recv(ml, noise, frame_buf, 65536);
-
-    if (frame_len <= 0) {
-        free(frame_buf);
-        int saved_errno = errno;
-        /* EAGAIN/EWOULDBLOCK = no data yet = not an error */
-        if (saved_errno == EAGAIN || saved_errno == EWOULDBLOCK) return 0;
-        return frame_len;  /* Real error or connection closed */
+/* Both framing layers span Noise records. Only this task owns their buffers. */
+typedef struct {microlink_t *ml;ml_noise_state_t *noise;} control_stream_ctx_t;
+static bool control_map(void *opaque,const char *json,size_t len) {
+    control_stream_ctx_t *ctx=opaque;microlink_t *ml=ctx->ml;
+    cJSON *map=cJSON_ParseWithLengthOpts(json,len+1,NULL,true);
+    if(!cJSON_IsObject(map)){cJSON_Delete(map);return false;}
+    ml_security_map(ml,map);
+    bool ok=ml_peer_map_update(ml,map);
+    cJSON *node=cJSON_GetObjectItemCaseSensitive(map,"Node");
+    cJSON *addresses=cJSON_GetObjectItemCaseSensitive(node,"Addresses");
+    cJSON *addr=cJSON_GetArrayItem(addresses,0);
+    if(cJSON_IsString(addr)) {
+        unsigned a,b,c,d;int used=0;
+        if(sscanf(addr->valuestring,"%u.%u.%u.%u/32%n",&a,&b,&c,&d,&used)==4&&used>0&&!addr->valuestring[used]&&a<=255&&b<=255&&c<=255&&d<=255)
+            ml->vpn_ip=(a<<24)|(b<<16)|(c<<8)|d;
     }
-
-    /* Extract DATA frame payload from H2 frames, track flow control */
-    uint8_t *json_data = NULL;
-    size_t json_data_len = 0;
-    uint32_t total_data_bytes = 0;
-    uint32_t data_stream_id = 0;
-    int pos = 0;
-
-    while (pos + 9 <= frame_len) {
-        uint32_t f_len = (frame_buf[pos] << 16) | (frame_buf[pos + 1] << 8) | frame_buf[pos + 2];
-        uint8_t f_type = frame_buf[pos + 3];
-        uint8_t f_flags = frame_buf[pos + 4];
-        uint32_t f_stream = ((frame_buf[pos + 5] & 0x7F) << 24) | (frame_buf[pos + 6] << 16) |
-                             (frame_buf[pos + 7] << 8) | frame_buf[pos + 8];
-        pos += 9;
-
-        if (pos + (int)f_len > frame_len) break;
-
-        if (f_type == 0x00) {  /* DATA frame */
-            total_data_bytes += f_len;
-            if (f_stream == 5) {
-                /* Long-poll MapResponse data (stream 5) — parse as JSON */
-                data_stream_id = f_stream;
-                if (f_len > 0) {
-                    json_data = frame_buf + pos;
-                    json_data_len = f_len;
-                }
-            } else if (f_len > 0) {
-                /* Endpoint update response (stream 7+) — discard body */
-                ESP_LOGD(TAG, "H2 stream %lu DATA: %lu bytes (discarded)",
-                         (unsigned long)f_stream, (unsigned long)f_len);
-            }
-        } else if (f_type == 0x06 && f_len == 8 && !(f_flags & 0x01)) {
-            /* HTTP/2 PING from server — respond with PONG (same payload, ACK flag) */
-            uint8_t pong[17];
-            pong[0] = 0x00; pong[1] = 0x00; pong[2] = 0x08;
-            pong[3] = 0x06; pong[4] = 0x01;
-            pong[5] = 0x00; pong[6] = 0x00; pong[7] = 0x00; pong[8] = 0x00;
-            memcpy(pong + 9, frame_buf + pos, 8);
-            noise_send(ml, noise, pong, sizeof(pong));
-            ESP_LOGI(TAG, "Sent HTTP/2 PONG in response to server PING");
-        } else if (f_type == 0x04 && !(f_flags & 0x01)) {
-            /* HTTP/2 SETTINGS from server — respond with SETTINGS ACK */
-            uint8_t settings_ack[9] = {0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00};
-            noise_send(ml, noise, settings_ack, sizeof(settings_ack));
-        }
-        pos += f_len;
+    cJSON_Delete(map);return ok;
+}
+static bool control_frame(void *opaque,uint8_t type,uint8_t flags,uint32_t stream,const uint8_t *data,size_t len) {
+    control_stream_ctx_t *ctx=opaque;uint8_t reply[26];int n=0;
+    if(type==0&&len) {
+        n=ml_h2_build_window_update(reply,13,0,(uint32_t)len);
+        /* Each DATA frame replenishes its own stream, never another stream. */
+        if(stream)n+=ml_h2_build_window_update(reply+n,13,stream,(uint32_t)len);
+    } else if(type==6) {
+        if(len!=8||stream)return false;
+        if(!(flags&1)){memset(reply,0,17);reply[2]=8;reply[3]=6;reply[4]=1;memcpy(reply+9,data,8);n=17;}
+    } else if(type==4) {
+        if(stream||(flags&1?len!=0:len%6!=0))return false;
+        if(!(flags&1)){memset(reply,0,9);reply[3]=4;reply[4]=1;n=9;}
     }
-
-    /* Send HTTP/2 WINDOW_UPDATE to replenish flow control after receiving DATA.
-     * Without this, the server's send window exhausts and the connection stalls.
-     * Must send for BOTH connection-level (stream 0) AND stream-level. (v1 reference) */
-    if (total_data_bytes > 0) {
-        uint8_t wu_buf[26];  /* 2 WINDOW_UPDATE frames: 13 bytes each */
-        /* Connection-level (stream 0) */
-        int wu_len = ml_h2_build_window_update(wu_buf, 13, 0, total_data_bytes);
-        /* Stream-level */
-        if (data_stream_id > 0) {
-            wu_len += ml_h2_build_window_update(wu_buf + wu_len, 13,
-                                                  data_stream_id, total_data_bytes);
-        }
-        noise_send(ml, noise, wu_buf, wu_len);
-    }
-
-    if (!json_data || json_data_len == 0) {
-        /* Keepalive, SETTINGS, or PING frame - not an error */
-        free(frame_buf);
-        return 1;  /* Got data, reset watchdog */
-    }
-
-    /* Skip 4-byte length prefix if present */
-    char *parse_start = (char *)json_data;
-    size_t parse_len = json_data_len;
-    if (parse_len > 4 && parse_start[4] == '{') {
-        parse_start += 4;
-        parse_len -= 4;
-    }
-
-    char saved = parse_start[parse_len];
-    parse_start[parse_len] = '\0';
-
-    cJSON *update_json = cJSON_Parse(parse_start);
-    parse_start[parse_len] = saved;
-
-    if (update_json) {
-        ESP_LOGI(TAG, "Long-poll MapResponse update received");
-        ml_security_map(ml,update_json);
-
-        /* Update VPN IP if present */
-        cJSON *node = cJSON_GetObjectItem(update_json, "Node");
-        if (node) {
-            cJSON *addresses = cJSON_GetObjectItem(node, "Addresses");
-            if (addresses && cJSON_GetArraySize(addresses) > 0) {
-                const char *addr = cJSON_GetArrayItem(addresses, 0)->valuestring;
-                if (addr) {
-                    unsigned a, b, c, d;
-                    if (sscanf(addr, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
-                        uint32_t new_ip = (a << 24) | (b << 16) | (c << 8) | d;
-                        if (new_ip != ml->vpn_ip) {
-                            ml->vpn_ip = new_ip;
-                            ESP_LOGI(TAG, "VPN IP updated via long-poll");
-                        }
-                    }
-                }
-            }
-        }
-
-        /* Parse peer updates */
-        parse_peers_from_map_response(ml, update_json);
-        cJSON_Delete(update_json);
-    }
-
-    free(frame_buf);
-    return 1;
+    return !n||noise_send(ctx->ml,ctx->noise,reply,n)>=0;
+}
+static int poll_map_update(microlink_t *ml,ml_noise_state_t *noise,ml_control_stream_t *stream) {
+    fd_set readfds;FD_ZERO(&readfds);FD_SET(ml->coord_sock,&readfds);
+    struct timeval tv={.tv_sec=0,.tv_usec=50000};
+    int selected=ml_select_fds(ml->coord_sock+1,&readfds,NULL,NULL,&tv);
+    if(selected<0)return errno==EINTR?0:-1;
+    if(!selected)return 0;
+    struct timeval deadline={.tv_sec=2,.tv_usec=0};
+    ml_setsockopt(ml->coord_sock,SOL_SOCKET,SO_RCVTIMEO,&deadline,sizeof(deadline));
+    uint8_t *buf=ml_psram_malloc(65536);if(!buf)return -1;
+    errno=0;
+    int n=noise_recv(ml,noise,buf,65536);int error=errno;
+    if(n<0){free(buf);return error==EAGAIN||error==EWOULDBLOCK?0:-1;}
+    control_stream_ctx_t ctx={ml,noise};
+    bool ok=ml_control_stream_feed(stream,buf,(size_t)n,control_frame,control_map,&ctx);
+    free(buf);return ok?1:-1;
 }
 
 /* ============================================================================
@@ -1904,6 +1813,7 @@ void ml_coord_task(void *arg) {
 
     /* Noise protocol state - owned exclusively by this task */
     ml_noise_state_t noise = {0};
+    ml_control_stream_t stream;ml_control_stream_init(&stream,ml_psram_malloc);
 
     /* Wait for WiFi/cellular OR shutdown */
     ESP_LOGI(TAG, "Waiting for WiFi...");
@@ -1930,6 +1840,7 @@ void ml_coord_task(void *arg) {
                 }
                 break;
             case ML_CMD_DISCONNECT:
+                ml_control_stream_reset(&stream);
                 if (ml->coord_sock >= 0) {
                     ml_close_sock(ml->coord_sock);
                     ml->coord_sock = -1;
@@ -2070,7 +1981,9 @@ void ml_coord_task(void *arg) {
 
             /* Start streaming long-poll for incremental updates */
             if (do_start_long_poll(ml, &noise) < 0) {
-                ESP_LOGW(TAG, "Failed to start long-poll (non-fatal)");
+                ESP_LOGW(TAG, "Failed to start long-poll");
+                ml_coord_diag_reconnect(ml,ML_COORD_REASON_POLL);
+                state=COORD_RECONNECTING;break;
             }
 
             /* Send initial endpoint update if STUN already completed.
@@ -2314,7 +2227,7 @@ void ml_coord_task(void *arg) {
                 }
 
                 /* Poll for streaming MapResponse updates */
-                int poll_ret = poll_map_update(ml, &noise);
+                int poll_ret = poll_map_update(ml, &noise, &stream);
                 if (poll_ret > 0) {
                     last_activity_ms = now;  /* Reset watchdog */
                 } else if (poll_ret < 0) {
@@ -2329,6 +2242,7 @@ void ml_coord_task(void *arg) {
             break;
 
         case COORD_RECONNECTING:
+            ml_control_stream_reset(&stream);
             ml_security_close(ml);
             cJSON_Delete(ml->peer_map);ml->peer_map=NULL;ml->peer_map_dirty=true;
             {
@@ -2368,6 +2282,7 @@ void ml_coord_task(void *arg) {
     }
 
     /* Cleanup */
+    ml_control_stream_reset(&stream);
     if (ml->coord_sock >= 0) {
         ml_close_sock(ml->coord_sock);
         ml->coord_sock = -1;
