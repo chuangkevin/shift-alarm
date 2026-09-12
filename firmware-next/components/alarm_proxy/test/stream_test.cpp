@@ -44,7 +44,8 @@ static void scenario(bool upload, bool informational, bool fragmented, bool chun
     if(upload)producer=std::thread([&]{for(size_t i=0;i<body.size();i+=1024)write_exact(pair[0],body.substr(i,1024));});
     const std::string response=read_all(pair[0]);
     const auto elapsed=esp_timer_get_time()-start;
-    if(producer.joinable())producer.join();proxy.join();backend.join();close_fd(pair[0]);enabled=false;
+    if(producer.joinable()){producer.join();}
+    proxy.join();backend.join();close_fd(pair[0]);enabled=false;
     assert(relayed);assert(elapsed<1500000); // Old upload-first relay hits its 3s deadline and fails.
     if(informational)assert(response.find("HTTP/1.1 103 Early Hints\r\n")==0);
     assert(response.size()>=final.size());assert(response.substr(response.size()-final.size())==final);
