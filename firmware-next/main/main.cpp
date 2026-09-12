@@ -465,6 +465,8 @@ void loop() {
   } else {pairingHoldActive=false;if(!chord)pairingTriggered=false;}
   if(events&9)stopRing(false);else if((events&4)&&!chord){if(portal)showJoinQr=!showJoinQr;}
   if(clockValid()) {
+    const int64_t corrected=alarmclock::reconcileHandled(now,handled);
+    if(corrected!=handled){handled=corrected;prefs.putLong64("handled",handled);}
     int64_t latest=handled;
     for(auto &alarm:alarms)if(alarmclock::due(alarm.epoch,now,handled)){startRing(alarm.label);latest=std::max(latest,alarm.epoch);}
     if(latest!=handled){handled=latest;prefs.putLong64("handled",handled);}
