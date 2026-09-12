@@ -1,4 +1,4 @@
-# Shift Alarm firmware v0.1.0
+# Shift Alarm firmware v0.1.1
 
 ## Verified hardware
 
@@ -10,9 +10,12 @@ ESP32-S3 rev 0.2, 16 MB QIO flash, 8 MB PSRAM. The original application contains
 2. Scan the first QR to join this setup WiFi. Accept the phone's “no Internet” network. Press **plus** to switch to the second QR, which opens `http://192.168.4.1`.
 3. Select a scanned SSID or type a hidden network name, enter its password, and connect. An unsuccessful attempt remains in setup. Successful connection persists credentials; setup AP closes after 20 seconds.
 4. Rejoin your home WiFi and scan the normal screen QR. It opens the device's LAN page, which links to the LAN shift-management website. No Tailscale installation is required on the phone.
-5. **BOOT:** stop a ringing alarm. **Minus:** snooze five minutes. **Plus:** speaker test outside setup, QR switch during setup. Hold **BOOT three seconds** to reopen setup.
+5. While ringing, **any of the three buttons stops the alarm immediately**, including during a backend request. Outside ringing, **Plus** switches the setup QR. Hold **Plus and Minus together for ten seconds** to reopen WiFi setup; the screen counts down and releasing either button cancels. Saved networks never automatically enter setup after a connection loss.
+6. Open **Display settings** on the device local page (also available during WiFi setup), choose 0°, 90°, 180°, or 270°, and save. Orientation survives reboot.
 
-Firmware polls the backend every five seconds, persists only changed schedule data, and sends heartbeat state. The alarm sound runs in an independent I2S task. A ring times out after three minutes. Alarms delayed by up to 90 seconds are caught up; older alarms are skipped. Handled timestamps and snooze deadlines persist across reboot. Display text uses the built-in ASCII font; Chinese alarm names currently appear as question marks on the device, while the management website retains their original text.
+TFT frames are composed in a memory buffer; the visible screen is never cleared between drawing the QR and text. Identical frames are not sent again. Only during ringing, the background alternates dark red/black every half-second.
+
+Firmware polls the backend every five seconds, persists only changed schedule data, and sends heartbeat state. The alarm sound runs in an independent I2S task. A ring times out after three minutes. Alarms delayed by up to 90 seconds are caught up; older alarms are skipped. Handled timestamps and snooze deadlines persist across reboot. Device UI uses a bundled Traditional Chinese bitmap subset; the source and OFL license are in `tools/generate_glyphs.py` and `fonts/OFL.txt`. Alarm display uses a consistent Traditional Chinese label.
 
 After complete power loss the ESP32 has no battery-backed wall clock. It waits for NTP or authenticated backend time before scheduling. After synchronization it continues keeping time and ringing stored alarms without WiFi while powered. Do not rely on an unsynchronized offline cold boot.
 
