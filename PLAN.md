@@ -8,7 +8,10 @@
 - [x] 新頁經隔離預覽呼叫真實 NewAPI：七月11上班、2待確認；實機班表未被測試覆蓋。
 - [x] 合併 native Tailnet 跨區 DERP 與路徑修復、host tests/IDF build/review。
 - [x] 0.2.3 寫入app1並雜湊驗證，開機成功、設定保留、80埠頁面正常、8081僅loopback。
-- [ ] 實機Tailscale資料通道仍未通：home9 connected，但tx0；native netif註冊/首包路由正在修復。
+- [x] 0.2.4 SDK foreign-state crash已修正：0.2.5完整重建啟用ESP-netif client data隔離，app1seq6雜湊驗證，啟動150秒無panic。未回退舊版本。
+- [ ] 0.2.5仍無辨識資料通道：mapped57但WGpeers0，out18全被filter拒絕；發現peer MachineAuthorized缺省被誤認未授權，正在修正解析。
+- [x] 後端改gemini-flash（channel實際映射gemini-3.8-flash），實圖九月14.3秒辨識11天且與原圖一致。
+- [x] 後端hard45s deadline/取消/資料保留 tests19pass，UI preflight8s/overall60s已入0.2.4。
 - [ ] 同頁上傳/確認/儲存流程實機驗證、更新交付檔案與本地提交。
 
 Tailscale 裝置授權已完成（100.90.212.116），但控制面 connected 不代表資料通道已通。
