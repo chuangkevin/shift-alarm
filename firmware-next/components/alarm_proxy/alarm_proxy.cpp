@@ -23,7 +23,7 @@ std::atomic<unsigned> generation{0}, clients{0}, completed{0}, rejected{0};
 std::atomic<uint32_t> bound_ip{0};
 bool configured=false;
 sockaddr_in upstream{};
-std::string authority, upstream_host;
+std::string authority;
 struct Session { int fd; unsigned generation; uint32_t local_ip; int64_t deadline; };
 bool live(const Session &s) { return enabled.load() && s.generation==generation.load() &&
     esp_timer_get_time()<s.deadline; }
@@ -57,7 +57,6 @@ std::string ip_string(uint32_t addr) {
 }
 int connect_upstream(const Session &s,bool local) {
     sockaddr_in destination=upstream;
-    inet_pton(AF_INET,alarm_proxy_backend_host(),&destination.sin_addr);
     if(local){destination.sin_addr.s_addr=htonl(INADDR_LOOPBACK);destination.sin_port=htons(8081);}
     int fd=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(fd<0)return -1;
     int flags=fcntl(fd,F_GETFL,0);fcntl(fd,F_SETFL,flags|O_NONBLOCK);
@@ -143,7 +142,7 @@ bool relay(Session &s) {
     std::string path=request.header.substr(first+1,last-first-1);
     request.local=!alarm_proxy::remote_path(path);
     if(!request.local){
-        if(!alarm_proxy::rewrite_request(head.substr(0,boundary),lan,std::string(alarm_proxy_backend_host())+":"+std::to_string(ntohs(upstream.sin_port)),request)){error_response(s.fd,"400 Bad Request",s);return false;}
+        if(!alarm_proxy::rewrite_request(head.substr(0,boundary),lan,authority,request)){error_response(s.fd,"400 Bad Request",s);return false;}
     }else if(request.content_length>98304){error_response(s.fd,"413 Payload Too Large",s);return false;}
     size_t buffered_body=head.size()-boundary;
     // Reject pipelining and bytes after the declared body before forwarding any data.
@@ -216,15 +215,6 @@ void listener(void *) {
     close_fd(fd);bound_ip=0;listening=false;running=false;vTaskDelete(nullptr);
 }
 }
-// The same service has a fixed LAN address. Prefer it only on its actual subnet;
-// never accept a destination supplied by a browser or bypass Tailnet ACLs.
-extern "C" const char *alarm_proxy_backend_host(void) {
-    esp_netif_ip_info_t ip{};
-    const uint32_t lan=inet_addr("192.168.18.31");
-    if(upstream.sin_addr.s_addr==inet_addr("100.126.226.79") && sta(ip) &&
-       (ip.ip.addr&ip.netmask.addr)==(lan&ip.netmask.addr))return "192.168.18.31";
-    return upstream_host.c_str();
-}
 extern "C" esp_err_t alarm_proxy_init(const char *ip,uint16_t port) {
     if(enabled.load() || running.load() || clients.load())return ESP_ERR_INVALID_STATE;
     in_addr addr{};
@@ -232,7 +222,7 @@ extern "C" esp_err_t alarm_proxy_init(const char *ip,uint16_t port) {
     const uint32_t n=ntohl(addr.s_addr);
     if(n==0 || (n>>24)==127 || (n>>24)>=224 || n==0xffffffffu)return ESP_ERR_INVALID_ARG;
     upstream={};upstream.sin_family=AF_INET;upstream.sin_port=htons(port);upstream.sin_addr=addr;
-    upstream_host=ip;authority=std::string(ip)+":"+std::to_string(port);configured=true;return ESP_OK;
+    authority=std::string(ip)+":"+std::to_string(port);configured=true;return ESP_OK;
 }
 extern "C" esp_err_t alarm_proxy_start(void) {
     if(!configured)return ESP_ERR_INVALID_STATE;

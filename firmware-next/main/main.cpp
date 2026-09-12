@@ -56,11 +56,6 @@ uint32_t tailnetAttempt=0;
 extern "C" bool verifyRollbackLater(){return true;}
 
 String revision, backend, token, manageUrl, ssid, password, apPassword;
-String activeBackend() {
-  if(backend=="http://100.126.226.79:8237")return String("http://")+alarm_proxy_backend_host()+":8237";
-  return backend;
-}
-
 int64_t handled=0,snooze=0;
 volatile bool ringing=false;
 volatile uint32_t buttonEvents=0,physicalStopDown=0,lastPlusPress=0;
@@ -293,7 +288,7 @@ void otaWorker(void*){
   alarm_ota_handle_t handle=0;HTTPClient h;esp_err_t err=ESP_FAIL;
   do{
     otaMessageSet("正在檢查更新版本");
-    h.setConnectTimeout(3000);h.setTimeout(5000);h.begin(activeBackend()+"/api/device/update");h.addHeader("Authorization",String("Bearer ")+token);
+    h.setConnectTimeout(3000);h.setTimeout(5000);h.begin(backend+"/api/device/update");h.addHeader("Authorization",String("Bearer ")+token);
     if(h.GET()!=200){otaMessageSet("無法取得更新資訊");break;}
     String manifestBody;if(!boundedHttpBody(h,4096,manifestBody,5000)){otaMessageSet("更新資訊大小無效或傳輸不完整");break;}
     JsonDocument d;if(deserializeJson(d,manifestBody)){otaMessageSet("更新資訊格式無效");break;}h.end();
@@ -303,7 +298,7 @@ void otaWorker(void*){
     if(strlen(board)>=sizeof(manifest.board)||strlen(version)>=sizeof(manifest.version)||strlen(sha)!=64||strlen(mac)!=64||!m["size"].is<uint32_t>()){otaMessageSet("更新資訊格式無效");break;}
     strlcpy(manifest.board,board,sizeof(manifest.board));strlcpy(manifest.version,version,sizeof(manifest.version));strlcpy(manifest.sha256,sha,sizeof(manifest.sha256));strlcpy(manifest.hmac_sha256,mac,sizeof(manifest.hmac_sha256));manifest.size=m["size"];
     err=alarm_ota_begin(&manifest,&otaSession,&handle);if(err!=ESP_OK){otaMessageSet("更新遭拒：請確認版本、排程與電源");break;}
-    h.begin(activeBackend()+"/api/device/firmware/"+manifest.sha256+".bin");h.addHeader("Authorization",String("Bearer ")+token);
+    h.begin(backend+"/api/device/firmware/"+manifest.sha256+".bin");h.addHeader("Authorization",String("Bearer ")+token);
     if(h.GET()!=200||h.getSize()!=int(manifest.size)){otaMessageSet("更新檔大小或回應不正確");break;}
     auto *stream=h.getStreamPtr();uint8_t buffer[4096];size_t received=0;uint32_t started=millis();bool failed=false;
     otaMessageSet("正在下載並驗證，請保持供電");
@@ -433,12 +428,12 @@ void routes() {
 void pollBackend() {
   if(localSchedule){syncState="班表已儲存";return;}
   if(!WiFi.isConnected()||backend.isEmpty()||token.isEmpty())return;
-  HTTPClient h; h.setConnectTimeout(1500);h.setTimeout(2000);h.begin(activeBackend()+"/api/device/schedule");h.addHeader("Authorization",String("Bearer ")+token);
+  HTTPClient h; h.setConnectTimeout(1500);h.setTimeout(2000);h.begin(backend+"/api/device/schedule");h.addHeader("Authorization",String("Bearer ")+token);
   int code=h.GET(); if(code==200){String err,body;if(!boundedHttpBody(h,MAX_JSON,body,8000))syncState="班表大小無效或傳輸不完整";else if(applySchedule(body,true,err))syncState="班表已同步";else syncState=err;}else syncState=String("同步失敗，回應碼 ")+code;h.end();
   JsonDocument d;d["revision"]=revision;d["status"]=ringing?"ringing":(clockValid()?"ready":"waiting_for_time");d["ip"]=WiFi.localIP().toString();
   int64_t next=INT64_MAX;for(auto &a:alarms)if(alarmclock::upcoming(a.epoch,time(nullptr),handled)&&a.epoch<next)next=a.epoch;
   if(next!=INT64_MAX)d["next_alarm"]=next;
-  String body;serializeJson(d,body);h.begin(activeBackend()+"/api/device/heartbeat");h.addHeader("Authorization",String("Bearer ")+token);h.addHeader("Content-Type","application/json");h.POST(body);h.end();
+  String body;serializeJson(d,body);h.begin(backend+"/api/device/heartbeat");h.addHeader("Authorization",String("Bearer ")+token);h.addHeader("Content-Type","application/json");h.POST(body);h.end();
 }
 void setup() {
   rtc_gpio_hold_dis(GPIO_NUM_21);rtc_gpio_init(GPIO_NUM_21);rtc_gpio_set_direction(GPIO_NUM_21,RTC_GPIO_MODE_OUTPUT_ONLY);rtc_gpio_set_level(GPIO_NUM_21,1); // Match the verified upstream board power control.
