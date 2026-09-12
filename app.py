@@ -7,6 +7,7 @@ import hmac
 import io
 import ipaddress
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -45,6 +46,8 @@ ALLOWED_HOSTS = set(os.environ.get('ALLOWED_HOSTS', '127.0.0.1,localhost,alarm.s
 ALLOWED_HOSTS.add(urlsplit(MANAGEMENT_URL).hostname)
 app = FastAPI(title='班表鬧鐘', version=VERSION, docs_url=None, redoc_url=None, openapi_url=None)
 import_lock = asyncio.Lock()
+RECOGNITION_SECONDS = 45
+recognition_log = logging.getLogger("uvicorn.error")
 
 @contextmanager
 def database():
@@ -164,7 +167,7 @@ def schedule(c, now=None):
 
 @app.get('/api/health')
 def health():
-    return {'ok': True, 'version': VERSION}
+    return {'ok': True, 'version': VERSION, 'recognition_ready': bool(NEWAPI_KEY)}
 
 @app.get('/api/state')
 def state():
@@ -334,7 +337,7 @@ async def recognize(raw, month):
                'messages': [{'role': 'system', 'content': prompt}, {'role': 'user', 'content': [
                    {'type': 'text', 'text': '請逐格擷取完整班表。'},
                    {'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' + base64.b64encode(raw).decode()}}]}]}
-    async with httpx.AsyncClient(timeout=httpx.Timeout(100, connect=10)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(RECOGNITION_SECONDS, connect=8)) as client:
         r = await client.post(NEWAPI_URL + '/chat/completions', headers={'Authorization': 'Bearer ' + NEWAPI_KEY}, json=payload)
         if r.status_code != 200:
             raise HTTPException(502, f'班表辨識服務回應 {r.status_code}，請稍後重試；原有鬧鐘不受影響')
@@ -372,10 +375,16 @@ async def import_month(file: UploadFile = File(...), month: str = Form(...)):
     if import_lock.locked():
         raise HTTPException(429, '另一張班表正在辨識，請稍後再試')
     async with import_lock:
+        started = time.monotonic()
+        recognition_log.info("Schedule recognition started")
         try:
-            m = await recognize(normalized, month)
+            m = await asyncio.wait_for(recognize(normalized, month), timeout=RECOGNITION_SECONDS)
+        except asyncio.TimeoutError as e:
+            recognition_log.warning("Schedule recognition timed out after %.1fs", time.monotonic() - started)
+            raise HTTPException(504, '班表辨識超過 45 秒，已停止等待；請重試或直接調整月曆，原有班表保留') from e
         except httpx.HTTPError as e:
             raise HTTPException(502, '辨識服務連線失敗或逾時，原有班表保留') from e
+        recognition_log.info("Schedule recognition completed in %.1fs", time.monotonic() - started)
         draft_id = uuid.uuid4().hex
         draft = {**m.model_dump(exclude={'draft_id'}), 'id': draft_id,
                  'source': 'image:' + hashlib.sha256(normalized).hexdigest(),

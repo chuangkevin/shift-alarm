@@ -80,3 +80,27 @@ def test_qr_and_no_secret_exposure():
     assert r.status_code == 200
     assert '<svg' in r.text
     assert 'test-device-token' not in client.get('/api/state').text
+
+def test_recognition_deadline_cancels_and_preserves_schedule(monkeypatch):
+    import asyncio
+    import io
+    from PIL import Image
+    cancelled = []
+    async def stalled(*args):
+        try:
+            await asyncio.sleep(10)
+        finally:
+            cancelled.append(True)
+    monkeypatch.setattr(app, 'RECOGNITION_SECONDS', 0.01)
+    monkeypatch.setattr(app, 'NEWAPI_KEY', 'test-key')
+    monkeypatch.setattr(app, 'recognize', stalled)
+    client.post('/api/months', json=month(), headers=UI)
+    b = io.BytesIO()
+    Image.new('RGB', (2, 2)).save(b, 'PNG')
+    r = client.post('/api/import', data={'month': '2026-09'}, files={'file': ('x.png', b.getvalue(), 'image/png')}, headers=UI)
+    assert r.status_code == 504
+    assert cancelled == [True]
+    assert not app.import_lock.locked()
+    assert len(client.get('/api/state').json()['months']) == 1
+    with app.database() as c:
+        assert c.execute('SELECT count(*) FROM drafts').fetchone()[0] == 0

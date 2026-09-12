@@ -6,8 +6,9 @@
 - [x] 月份保留一次性測試鬧鐘；不一致的逐日時間需確認才統一；原子保存與回讀。
 - [x] 手動校時日期/時分選擇、延遲回應保護與校時回退後排程恢復。
 - [x] 新頁經隔離預覽呼叫真實 NewAPI：七月11上班、2待確認；實機班表未被測試覆蓋。
-- [ ] 合併 native Tailnet 跨區 DERP 與路徑修復、host tests/IDF build/review。
-- [ ] 寫入新版備用分區，開機、80埠全流程、loopback8081不外露與Tailscale資料通道實測。
+- [x] 合併 native Tailnet 跨區 DERP 與路徑修復、host tests/IDF build/review。
+- [x] 0.2.3 寫入app1並雜湊驗證，開機成功、設定保留、80埠頁面正常、8081僅loopback。
+- [ ] 實機Tailscale資料通道仍未通：home9 connected，但tx0；native netif註冊/首包路由正在修復。
 - [ ] 同頁上傳/確認/儲存流程實機驗證、更新交付檔案與本地提交。
 
 Tailscale 裝置授權已完成（100.90.212.116），但控制面 connected 不代表資料通道已通。
