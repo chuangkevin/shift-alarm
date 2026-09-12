@@ -133,6 +133,13 @@ done:
 static bool match_ip(const char *s,uint32_t ip) {
     if(!s)return false;
     if(!strcmp(s,"*"))return true;
+    const char *dash=strchr(s,'-');
+    if(dash) {
+        unsigned a,b,c,d,e,f,g,h;int used=0;
+        if(sscanf(s,"%u.%u.%u.%u-%u.%u.%u.%u%n",&a,&b,&c,&d,&e,&f,&g,&h,&used)!=8||!used||s[used]||a>255||b>255||c>255||d>255||e>255||f>255||g>255||h>255)return false;
+        uint32_t first=(a<<24)|(b<<16)|(c<<8)|d,last=(e<<24)|(f<<16)|(g<<8)|h;
+        return first<=last&&ip>=first&&ip<=last;
+    }
     unsigned a,b,c,d,bits=32;int used=0;
     if(sscanf(s,"%u.%u.%u.%u%n",&a,&b,&c,&d,&used)!=4||a>255||b>255||c>255||d>255)return false;
     if(s[used]) { int n=0;if(sscanf(s+used,"/%u%n",&bits,&n)!=1||s[used+n]||bits>32)return false; }
@@ -175,17 +182,19 @@ bool ml_security_packet(struct pbuf *p,bool outbound,void *ctx) {
     microlink_t *ml=ctx;uint8_t h[64];
     if(!ml||!p)return false;
     xSemaphoreTake(ml->security.lock,portMAX_DELAY);
-    bool allowed=false;
+    bool allowed=false;unsigned reason=1;
     if(outbound)ml->security.wg_out_packets++;else ml->security.wg_in_packets++;
     if(p->tot_len<28)goto done;
     size_t n=pbuf_copy_partial(p,h,sizeof(h),0);
     unsigned ihl=(h[0]&15)*4;
     if((h[0]>>4)!=4||ihl<20||ihl>60||n<ihl+4||be16(h+2)>p->tot_len||be16(h+2)<ihl+8||(be16(h+6)&0x3fff))goto done;
-    uint8_t proto=h[9];if(proto!=6&&proto!=17)goto done;
+    uint8_t proto=h[9];if(proto!=6&&proto!=17){reason=2;goto done;}
     uint32_t src=be32(h+12),dst=be32(h+16);
     uint16_t sport=be16(h+ihl),dport=be16(h+ihl+2);
     if(outbound){ml->security.wg_last_out_src=src;ml->security.wg_last_out_dst=dst;}
+    if(!outbound){ml->security.wg_last_in_src=src;ml->security.wg_last_in_dst=dst;ml->security.wg_last_in_port=dport;}
     uint64_t now=ml_get_time_ms();
+    reason=3;
     if(!ml->security.peers_ready||!ml->security.ready||!ml->security.authorized||ml->security.expired||
        (ml->security.expiry>0&&time(NULL)>=ml->security.expiry))goto done;
     uint32_t remote=outbound?dst:src;bool known=false;
@@ -193,9 +202,9 @@ bool ml_security_packet(struct pbuf *p,bool outbound,void *ctx) {
         ml_allowed_peer_t *peer=&ml->security.peers[i];
         if(peer->ip==remote && (!peer->expiry||time(NULL)<peer->expiry)){known=true;break;}
     }
-    if(!known)goto done;
+    reason=4;if(!known)goto done;
     if(outbound) {
-        if(src!=ml->vpn_ip)goto done;
+        reason=5;if(src!=ml->vpn_ip)goto done;
         unsigned slot=0;
         for(unsigned i=0;i<16;i++) {
             ml_flow_t *f=&ml->security.flows[i];
@@ -204,16 +213,30 @@ bool ml_security_packet(struct pbuf *p,bool outbound,void *ctx) {
         }
         ml->security.flows[slot]=(ml_flow_t){src,dst,sport,dport,proto,now+120000};allowed=true;goto done;
     }
-    if(dst!=ml->vpn_ip)goto done;
+    reason=6;if(dst!=ml->vpn_ip)goto done;
     for(unsigned i=0;i<16;i++) {
         ml_flow_t *f=&ml->security.flows[i];
         if(f->until_ms>=now&&f->src==dst&&f->dst==src&&f->sport==dport&&f->dport==sport&&f->proto==proto){allowed=true;goto done;}
     }
+    reason=7;
     cJSON *part,*rule;
     cJSON_ArrayForEach(part,ml->security.filters)cJSON_ArrayForEach(rule,part)
         if(rule_allows(rule,src,dst,dport,proto)){allowed=true;goto done;}
 done:
-    if(!allowed){if(outbound)ml->security.wg_out_dropped++;else ml->security.wg_in_dropped++;}
+    if(!allowed){if(outbound)ml->security.wg_out_dropped++;else {ml->security.wg_in_dropped++;ml->security.wg_last_in_drop=reason;
+        ml->security.acl_rule_count=ml->security.acl_range_count=ml->security.acl_unsupported_count=0;
+        cJSON *part,*rule,*field,*item;
+        cJSON_ArrayForEach(part,ml->security.filters)cJSON_ArrayForEach(rule,part) {
+            ml->security.acl_rule_count++;
+            cJSON *caps=cJSON_GetObjectItemCaseSensitive(rule,"CapGrant");
+            if(caps&&!cJSON_IsNull(caps)&&(!cJSON_IsArray(caps)||cJSON_GetArraySize(caps)))ml->security.acl_unsupported_count++;
+            cJSON_ArrayForEach(field,rule)if(!field->string||(strcmp(field->string,"SrcIPs")&&strcmp(field->string,"DstPorts")&&strcmp(field->string,"IPProto")&&strcmp(field->string,"CapGrant")))ml->security.acl_unsupported_count++;
+            cJSON_ArrayForEach(item,cJSON_GetObjectItemCaseSensitive(rule,"SrcIPs"))if(cJSON_IsString(item)&&strchr(item->valuestring,'-'))ml->security.acl_range_count++;
+            cJSON_ArrayForEach(item,cJSON_GetObjectItemCaseSensitive(rule,"DstPorts")) {
+                cJSON *ip=cJSON_GetObjectItemCaseSensitive(item,"IP");if(cJSON_IsString(ip)&&strchr(ip->valuestring,'-'))ml->security.acl_range_count++;
+                if(cJSON_GetObjectItemCaseSensitive(item,"Bits"))ml->security.acl_unsupported_count++;
+            }
+        }}}
     xSemaphoreGive(ml->security.lock);return allowed;
 }
 

@@ -275,3 +275,28 @@ this transition. Fresh successful full-map recovery has a RESET/ADD/SYNC_DONE
 generation path; no permanent readiness restoration defect was demonstrated.
 The additional fields make the next runtime observation discriminate control
 reconnect, policy compilation, peer installation and own-node authorization.
+
+### Incoming ACL diagnostics and IPv4 ranges
+
+Both source and destination ACL selectors now accept inclusive IPv4 address
+ranges, as specified by tailcfg FilterRule (alongside existing wildcard, IP
+and CIDR forms). Reversed, malformed and out-of-range selectors deny access.
+Host tests cover both endpoints, single-address ranges and rejection cases.
+This corrects a protocol-format omission; it does not prove the live device
+filter uses ranges. No ACL or authorization requirement is bypassed.
+
+Safe status fields `wg_last_in_src`, `wg_last_in_dst` (host-order IPv4),
+`wg_last_in_port`, `wg_last_in_drop` identify the latest rejected incoming
+packet. Address/port fields update only after a valid TCP/UDP header, so on
+malformed/protocol rejection they may describe an earlier packet. Drop codes:
+1 malformed/fragmented IPv4; 2 unsupported protocol; 3 policy/peer/auth/expiry
+gate; 4 unknown or expired peer; 5 invalid outgoing source (reserved here);
+6 wrong incoming destination; 7 no matching ACL rule. The last drop reason
+persists after successful packets.
+
+`acl_rule_count`, `acl_range_count`, `acl_unsupported_count` summarize the
+filter at the latest inbound rejection. They contain counts only, never raw
+filter text, capabilities, keys or authentication URLs. Unsupported counts
+include unknown/deprecated fields and nonempty capability grants; multiple
+unsupported fields may belong to one rule. IPv6 selectors are not counted as
+unsupported because they correctly do not match this IPv4-only data path.

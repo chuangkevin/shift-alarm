@@ -35,6 +35,13 @@ static void publish(void) {
         next.peer_count=client->security.observed_peer_count;
         next.peer_capacity=ML_POLICY_MAX_PEERS;
         next.capacity_exceeded=client->security.capacity_exceeded;
+        next.wg_last_in_src=client->security.wg_last_in_src;
+        next.wg_last_in_dst=client->security.wg_last_in_dst;
+        next.wg_last_in_port=client->security.wg_last_in_port;
+        next.wg_last_in_drop=client->security.wg_last_in_drop;
+        next.acl_rule_count=client->security.acl_rule_count;
+        next.acl_range_count=client->security.acl_range_count;
+        next.acl_unsupported_count=client->security.acl_unsupported_count;
         next.wg_out_packets=client->security.wg_out_packets;
         next.wg_out_dropped=client->security.wg_out_dropped;
         next.wg_in_packets=client->security.wg_in_packets;

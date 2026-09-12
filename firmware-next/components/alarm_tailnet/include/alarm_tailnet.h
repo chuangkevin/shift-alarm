@@ -23,6 +23,8 @@ typedef struct {
     esp_err_t last_error;
     uint16_t peer_count, peer_capacity;
     bool capacity_exceeded;
+    uint32_t wg_last_in_src, wg_last_in_dst, wg_last_in_port, wg_last_in_drop;
+    uint32_t acl_rule_count, acl_range_count, acl_unsupported_count;
     uint32_t wg_out_packets, wg_out_dropped, wg_in_packets, wg_in_dropped, wg_rx_packets;
     uint32_t wg_netif_ip, wg_last_out_src, wg_last_out_dst; /* Host-order IPv4. */
     uint32_t wg_netif_mask, wg_lookup_misses, wg_derp_enqueue, wg_derp_enqueue_fail, wg_udp_tx;

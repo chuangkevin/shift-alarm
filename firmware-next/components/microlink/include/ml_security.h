@@ -34,6 +34,8 @@ typedef struct {
     ml_allowed_peer_t peers[ML_POLICY_MAX_PEERS];
     unsigned peer_count;
     ml_flow_t flows[16];
+    uint32_t wg_last_in_src, wg_last_in_dst, wg_last_in_port, wg_last_in_drop;
+    uint32_t acl_rule_count, acl_range_count, acl_unsupported_count;
     uint32_t wg_out_packets, wg_out_dropped, wg_in_packets, wg_in_dropped, wg_rx_packets;
     uint32_t wg_netif_ip, wg_last_out_src, wg_last_out_dst;
     uint32_t wg_netif_mask, wg_lookup_misses, wg_derp_enqueue, wg_derp_enqueue_fail, wg_udp_tx;

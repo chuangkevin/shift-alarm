@@ -27,6 +27,13 @@ int main(void){
  assert(auth(&m,"{\"Error\":\"denied\",\"MachineAuthorized\":true}")==-1);
  assert(auth(&m,"{\"MachineAuthorized\":true}")==0);
  m.security.peers_ready=true;m.security.peer_count=1;m.security.peers[0]=(ml_allowed_peer_t){.ip=0x64400002,.expiry=0};
+ /* Inclusive source and destination ranges are tailcfg FilterRule syntax. */
+ const char *ranges[]={"100.64.0.2-100.64.0.2","100.64.0.1-100.64.0.2","100.64.0.2-100.64.0.3","100.64.0.3-100.64.0.4","100.64.0.3-100.64.0.1","100.64.0.2-100.64.0.999","100.64.0.2-100.64.0.3x"};
+ for(unsigned i=0;i<sizeof(ranges)/sizeof(ranges[0]);i++) {
+   char json[320];snprintf(json,sizeof(json),"{\"PacketFilter\":[{\"SrcIPs\":[\"%s\"],\"DstPorts\":[{\"IP\":\"100.64.0.1-100.64.0.1\",\"Ports\":{\"First\":80,\"Last\":80}}]}]}",ranges[i]);
+   map(&m,json);assert(ml_security_packet(&p,false,&m)==(i<3));
+   if(i>=3){assert(m.security.wg_last_in_drop==7&&m.security.acl_range_count==2&&m.security.acl_rule_count==1);assert(m.security.wg_last_in_src==0x64400002&&m.security.wg_last_in_dst==m.vpn_ip&&m.security.wg_last_in_port==80);}
+ }
  map(&m,"{\"PacketFilter\":[]}");assert(!ml_security_packet(&p,false,&m));
  map(&m,"{\"PacketFilter\":[{\"SrcIPs\":[\"100.64.0.2/32\"],\"IPProto\":[6],\"DstPorts\":[{\"IP\":\"100.64.0.1\",\"Ports\":{\"First\":80,\"Last\":80}}]}]}");
  assert(ml_security_packet(&p,false,&m));h[23]=81;assert(!ml_security_packet(&p,false,&m));h[23]=80;
