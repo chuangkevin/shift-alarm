@@ -379,6 +379,7 @@ static err_t wireguardif_output(struct netif *netif, struct pbuf *q, const ip4_a
 	
 		return wireguardif_output_to_peer(netif, q, ipaddr, peer);
 	} else {
+		device->output_lookup_misses++;
 		WG_DEBUG("[WG_OUTPUT] NO PEER FOUND for %s! Dumping all peers:\n", ipaddr_ntoa(&addr));
 		for (int i = 0; i < WIREGUARD_MAX_PEERS; i++) {
 			struct wireguard_peer *p = &device->peers[i];

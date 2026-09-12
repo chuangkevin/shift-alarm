@@ -173,15 +173,19 @@ static bool rule_allows(cJSON *rule,uint32_t src,uint32_t dst,uint16_t port,uint
 }
 bool ml_security_packet(struct pbuf *p,bool outbound,void *ctx) {
     microlink_t *ml=ctx;uint8_t h[64];
-    if(!ml||!p||p->tot_len<28)return false;
+    if(!ml||!p)return false;
+    xSemaphoreTake(ml->security.lock,portMAX_DELAY);
+    bool allowed=false;
+    if(outbound)ml->security.wg_out_packets++;else ml->security.wg_in_packets++;
+    if(p->tot_len<28)goto done;
     size_t n=pbuf_copy_partial(p,h,sizeof(h),0);
     unsigned ihl=(h[0]&15)*4;
-    if((h[0]>>4)!=4||ihl<20||ihl>60||n<ihl+4||be16(h+2)>p->tot_len||be16(h+2)<ihl+8||(be16(h+6)&0x3fff))return false;
-    uint8_t proto=h[9];if(proto!=6&&proto!=17)return false;
+    if((h[0]>>4)!=4||ihl<20||ihl>60||n<ihl+4||be16(h+2)>p->tot_len||be16(h+2)<ihl+8||(be16(h+6)&0x3fff))goto done;
+    uint8_t proto=h[9];if(proto!=6&&proto!=17)goto done;
     uint32_t src=be32(h+12),dst=be32(h+16);
     uint16_t sport=be16(h+ihl),dport=be16(h+ihl+2);
-    xSemaphoreTake(ml->security.lock,portMAX_DELAY);
-    bool allowed=false;uint64_t now=ml_get_time_ms();
+    if(outbound){ml->security.wg_last_out_src=src;ml->security.wg_last_out_dst=dst;}
+    uint64_t now=ml_get_time_ms();
     if(!ml->security.peers_ready||!ml->security.ready||!ml->security.authorized||ml->security.expired||
        (ml->security.expiry>0&&time(NULL)>=ml->security.expiry))goto done;
     uint32_t remote=outbound?dst:src;bool known=false;
@@ -209,5 +213,6 @@ bool ml_security_packet(struct pbuf *p,bool outbound,void *ctx) {
     cJSON_ArrayForEach(part,ml->security.filters)cJSON_ArrayForEach(rule,part)
         if(rule_allows(rule,src,dst,dport,proto)){allowed=true;goto done;}
 done:
+    if(!allowed){if(outbound)ml->security.wg_out_dropped++;else ml->security.wg_in_dropped++;}
     xSemaphoreGive(ml->security.lock);return allowed;
 }

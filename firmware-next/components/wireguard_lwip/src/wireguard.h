@@ -183,6 +183,7 @@ struct wireguard_peer {
 };
 
 struct wireguard_device {
+	uint32_t output_lookup_misses; /* Owned by the TCPIP core lock. */
 	// Maybe have a "Device private" member to abstract these?
 	struct netif *netif;
 	struct udp_pcb *udp_pcb;

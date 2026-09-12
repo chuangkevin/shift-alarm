@@ -32,6 +32,12 @@ typedef struct {
     ml_allowed_peer_t peers[ML_POLICY_MAX_PEERS];
     unsigned peer_count;
     ml_flow_t flows[16];
+    uint32_t wg_out_packets, wg_out_dropped, wg_in_packets, wg_in_dropped, wg_rx_packets;
+    uint32_t wg_netif_ip, wg_last_out_src, wg_last_out_dst;
+    uint32_t wg_netif_mask, wg_lookup_misses, wg_derp_enqueue, wg_derp_enqueue_fail, wg_udp_tx;
+    uint16_t wg_sessions, wg_peer_count;
+    uint8_t wg_netif_index;
+    bool wg_netif_up, wg_netif_link_up;
     uint16_t derp_home_region, derp_remote_connected;
     bool derp_home_connected;
     uint32_t derp_frames_tx, derp_frames_rx, derp_connect_failures, derp_capacity_drops, derp_queue_drops, derp_route_drops;

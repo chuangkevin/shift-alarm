@@ -179,3 +179,30 @@ The cached status exposes `derp_home_connected`, `derp_home_region`,
 success. Actual bidirectional HTTP, certificate rejection, reconnect,
 manual reauth, expiry, revocation and memory headroom with the display active
 still require hardware acceptance after integration.
+
+### Native routing follow-up
+
+After 0.2.3, real DERP receive counters advanced while HTTP still timed out
+and DERP transmit remained zero. The native interface now uses `netif_add`
+instead of splicing `netif_list`: the latter left interface number zero and
+aliased lwIP's loopback index. Later control-plane self-address changes also
+use `netif_set_ipaddr` on the core-locked owner path rather than leaving the
+interface at its initial address.
+
+The actual SDK host routing regression proves index aliasing, but also proves
+that ordinary unbound IPv4 routing still selected the old manual interface.
+Therefore this integrity fix alone is **not** an established explanation for
+the device's HTTP failure. The magicsock initialization does not install the
+normal-mode timer; its active periodic path already keeps LINK_UP before the
+first handshake.
+
+Additional cached diagnostics separate the next verification stages:
+`wg_netif_ip`, `wg_netif_mask`, `wg_netif_index`, `wg_netif_up`,
+`wg_netif_link_up`, `wg_peer_count`, `wg_sessions`, `wg_out_packets`,
+`wg_out_dropped`, `wg_last_out_src`, `wg_last_out_dst`, `wg_lookup_misses`,
+`wg_derp_enqueue`, `wg_derp_enqueue_fail`, `wg_udp_tx`, `wg_rx_packets`,
+`wg_in_packets`, and `wg_in_dropped`. IPv4 integers are in host order.
+Output/inbound counters run at the plaintext policy boundary; raw RX counts
+include WG handshake packets. These contain no keys or payloads. The owner
+copies netif/peer state under core→policy lock order; HTTP reads only a cached
+snapshot. Real bidirectional HTTP still needs validation after integration.

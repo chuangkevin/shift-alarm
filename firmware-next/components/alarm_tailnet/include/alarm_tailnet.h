@@ -18,6 +18,12 @@ typedef struct {
     esp_err_t last_error;
     uint16_t peer_count, peer_capacity;
     bool capacity_exceeded;
+    uint32_t wg_out_packets, wg_out_dropped, wg_in_packets, wg_in_dropped, wg_rx_packets;
+    uint32_t wg_netif_ip, wg_last_out_src, wg_last_out_dst; /* Host-order IPv4. */
+    uint32_t wg_netif_mask, wg_lookup_misses, wg_derp_enqueue, wg_derp_enqueue_fail, wg_udp_tx;
+    uint16_t wg_sessions, wg_peer_count;
+    uint8_t wg_netif_index;
+    bool wg_netif_up, wg_netif_link_up;
     /* Transport diagnostics; control-plane CONNECTED alone does not prove TCP. */
     bool derp_home_connected;
     uint16_t derp_home_region, derp_remote_connected;

@@ -129,6 +129,10 @@ static err_t wg_derp_output_cb(const uint8_t *peer_public_key,
     }
 
     esp_err_t err = ml_derp_queue_send(ml, peer_public_key, data, len);
+    xSemaphoreTake(ml->security.lock,portMAX_DELAY);
+    ml->security.wg_derp_enqueue++;
+    if(err!=ESP_OK)ml->security.wg_derp_enqueue_fail++;
+    xSemaphoreGive(ml->security.lock);
     return (err == ESP_OK) ? ERR_OK : ERR_MEM;
 }
 
@@ -145,6 +149,7 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
     microlink_t *ml = (microlink_t *)ctx;
     if (!ml) return ERR_CONN;
 
+    xSemaphoreTake(ml->security.lock,portMAX_DELAY);ml->security.wg_udp_tx++;xSemaphoreGive(ml->security.lock);
     /* Log WG packets sent via direct UDP */
     uint32_t ip_host = ntohl(dest_ip);
     ESP_LOGI(TAG, "WG UDP TX: %d bytes -> %d.%d.%d.%d:%d type=%d",
@@ -195,37 +200,18 @@ static esp_err_t wg_init_interface_tcpip(microlink_t *ml) {
     /* Disable internal socket binding (we use magicsock mode) */
     wireguardif_disable_socket_bind();
 
-    /* Initialize WireGuard netif */
-    netif->state = &wg_init;
-    err_t err = wireguardif_init(netif);
-    if (err != ERR_OK) {
-        ESP_LOGE(TAG, "wireguardif_init failed: %d", err);
+    /* Let lwIP initialize and register the interface, including its unique
+     * index, IPv4/IPv6 state, checksum flags and loopback bookkeeping. A manual
+     * netif_list splice leaves num=0 and aliases the loopback interface. */
+    ip4_addr_t ip,mask,gateway;
+    IP4_ADDR(&ip,(ml->vpn_ip>>24)&255,(ml->vpn_ip>>16)&255,
+             (ml->vpn_ip>>8)&255,ml->vpn_ip&255);
+    IP4_ADDR(&mask,255,192,0,0);
+    IP4_ADDR(&gateway,0,0,0,0);
+    if(!netif_add(netif,&ip,&mask,&gateway,&wg_init,wireguardif_init,tcpip_input)) {
         free(netif);
         return ESP_FAIL;
     }
-
-    /* Set IP addresses: our VPN IP (or temporary until we get one) */
-    if (ml->vpn_ip != 0) {
-        uint8_t a = (ml->vpn_ip >> 24) & 0xFF;
-        uint8_t b = (ml->vpn_ip >> 16) & 0xFF;
-        uint8_t c = (ml->vpn_ip >> 8) & 0xFF;
-        uint8_t d = ml->vpn_ip & 0xFF;
-        IP4_ADDR(&netif->ip_addr.u_addr.ip4, a, b, c, d);
-    } else {
-        IP4_ADDR(&netif->ip_addr.u_addr.ip4, 100, 64, 0, 1);  /* temp */
-    }
-    IP4_ADDR(&netif->netmask.u_addr.ip4, 255, 192, 0, 0);     /* /10 */
-    IP4_ADDR(&netif->gw.u_addr.ip4, 0, 0, 0, 0);
-
-    /* Use tcpip_input so decrypted packets are posted to the TCPIP thread.
-     * Required for TCP (esp_http_server sockets) — ip_input from the wg_mgr
-     * thread accesses TCP PCB state without synchronization.  The WG output
-     * callback uses raw udp_sendto (not BSD sendto) to avoid deadlock. */
-    netif->input = tcpip_input;
-
-    /* Add to lwIP netif list (bypass netif_add which wants init callback) */
-    netif->next = netif_list;
-    netif_list = netif;
 
     /* Bring interface up */
     netif_set_up(netif);
@@ -327,7 +313,8 @@ static void wg_update_vpn_ip(microlink_t *ml) {
         uint8_t b = (ml->vpn_ip >> 16) & 0xFF;
         uint8_t c = (ml->vpn_ip >> 8) & 0xFF;
         uint8_t d = ml->vpn_ip & 0xFF;
-        IP4_ADDR(&netif->ip_addr.u_addr.ip4, a, b, c, d);
+        ip4_addr_t ip;IP4_ADDR(&ip,a,b,c,d);
+        netif_set_ipaddr(netif,&ip);
     }
 }
 
@@ -348,6 +335,32 @@ static int find_peer_by_key(microlink_t *ml, const uint8_t *pubkey) {
         }
     }
     return -1;
+}
+
+/* Capture dataplane state on the owner task, under the same core -> policy
+ * lock order as packet output. HTTP reads only the wrapper's cached copy. */
+static void wg_publish_diagnostics(microlink_t *ml) {
+    WG_CORE_GUARD;
+    struct netif *netif=ml->wg_netif;
+    uint16_t sessions=0,peers=0;uint32_t misses=0;
+    if(netif&&netif->state) {
+        struct wireguard_device *device=netif->state;
+        misses=device->output_lookup_misses;
+        for(unsigned i=0;i<WIREGUARD_MAX_PEERS;i++) {
+            if(device->peers[i].valid)peers++;
+            if(device->peers[i].valid&&device->peers[i].curr_keypair.valid)sessions++;
+        }
+    }
+    xSemaphoreTake(ml->security.lock,portMAX_DELAY);
+    ml->security.wg_netif_ip=netif?ntohl(ip4_addr_get_u32(netif_ip4_addr(netif))):0;
+    ml->security.wg_netif_index=netif?netif_get_index(netif):0;
+    ml->security.wg_netif_up=netif&&netif_is_up(netif);
+    ml->security.wg_netif_link_up=netif&&netif_is_link_up(netif);
+    ml->security.wg_sessions=sessions;
+    ml->security.wg_peer_count=peers;
+    ml->security.wg_lookup_misses=misses;
+    ml->security.wg_netif_mask=netif?ntohl(ip4_addr_get_u32(netif_ip4_netmask(netif))):0;
+    xSemaphoreGive(ml->security.lock);
 }
 
 static int find_peer_by_ip(microlink_t *ml, uint32_t vpn_ip) {
@@ -1155,6 +1168,7 @@ static void process_wg_packet(microlink_t *ml, const ml_rx_packet_t *pkt) {
              (int)pkt->len, pkt->via_derp,
              pkt->len >= 4 ? pkt->data[0] : -1,
              pkt->src_pubkey[0], pkt->src_pubkey[1], pkt->src_pubkey[2], pkt->src_pubkey[3]);
+    xSemaphoreTake(ml->security.lock,portMAX_DELAY);ml->security.wg_rx_packets++;xSemaphoreGive(ml->security.lock);
     if (!ml->wg_netif) {
         free(pkt->data);
         return;
@@ -1548,6 +1562,8 @@ void ml_wg_mgr_task(void *arg) {
     bool stun_cmm_sent = false;  /* One-shot: send CMMs after first STUN result */
 
     while (!(xEventGroupGetBits(ml->events) & ML_EVT_SHUTDOWN_REQUEST)) {
+        /* Apply a changed self address through lwIP before processing peers. */
+        wg_update_vpn_ip(ml);
         /* Process peer updates from coord task */
         process_peer_updates(ml);
 
@@ -1626,6 +1642,7 @@ void ml_wg_mgr_task(void *arg) {
         if (ml->wg_netif && now - last_wg_periodic_ms >= 400) {
             uint64_t t0 = now;
             wireguardif_periodic((struct netif *)ml->wg_netif);
+            wg_publish_diagnostics(ml);
             uint64_t dt = ml_get_time_ms() - t0;
             last_wg_periodic_ms = now;
             ESP_LOGI(TAG, "wireguardif_periodic: %llu ms", (unsigned long long)dt);
