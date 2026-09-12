@@ -38,7 +38,7 @@ class Client:
 
     def request(self, url, headers=None, body=None):
         request = urllib.request.Request(url, data=body, headers=headers or {})
-        with self.opener.open(request, timeout=8) as response:
+        with self.opener.open(request, timeout=20) as response:
             data = response.read(65537)
             if len(data) > 65536:
                 raise ValueError('Response exceeds limit')
