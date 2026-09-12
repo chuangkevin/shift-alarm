@@ -51,12 +51,15 @@ static void scenario(bool upload, bool informational, bool fragmented, bool chun
     assert(response.size()>=final.size());assert(response.substr(response.size()-final.size())==final);
 }
 static void local_route(){
+ // Production configure() initializes the address family before accepting work.
+ // Linux rejects AF_UNSPEC even when the local-route override supplies IP/port.
+ upstream={};upstream.sin_family=AF_INET;
  int listener_fd=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);assert(listener_fd>=0);int yes=1;setsockopt(listener_fd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
  sockaddr_in addr{};addr.sin_family=AF_INET;addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);addr.sin_port=htons(8081);
  assert(bind(listener_fd,reinterpret_cast<sockaddr*>(&addr),sizeof(addr))==0);assert(listen(listener_fd,1)==0);
  int pair[2];assert(socketpair(AF_UNIX,SOCK_STREAM,0,pair)==0);timeouts(pair[0]);timeouts(pair[1]);enabled=true;unsigned epoch=generation.fetch_add(1)+1;
  Session session{pair[1],epoch,htonl(INADDR_LOOPBACK),esp_timer_get_time()+3000000};
- std::thread local([&]{int fd=accept(listener_fd,nullptr,nullptr);assert(fd>=0);timeouts(fd);char buf[2048];int n=recv(fd,buf,sizeof(buf),0);assert(n>0);std::string req(buf,n);assert(req.find("GET /display HTTP/1.1") == 0);assert(req.find("Host: 127.0.0.1\r\n")!=std::string::npos);write_exact(fd,"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nLOCAL");close_fd(fd);});
+ std::thread local([&]{int fd=accept(listener_fd,nullptr,nullptr);assert(fd>=0);timeouts(fd);char buf[2048];std::string req;while(req.find("\r\n\r\n")==std::string::npos){int n=recv(fd,buf,sizeof(buf),0);assert(n>0);req.append(buf,size_t(n));}assert(req.find("GET /display HTTP/1.1") == 0);assert(req.find("Host: 127.0.0.1\r\n")!=std::string::npos);write_exact(fd,"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nLOCAL");close_fd(fd);});
  std::thread gateway([&]{assert(relay(session));close_fd(pair[1]);});
  write_exact(pair[0],"GET /display HTTP/1.1\r\nHost: 127.0.0.1:80\r\n\r\n");auto response=read_all(pair[0]);assert(response.find("LOCAL")!=std::string::npos);
  gateway.join();local.join();close_fd(pair[0]);close_fd(listener_fd);enabled=false;
