@@ -20,7 +20,7 @@ int main(void){
  cJSON *req=cJSON_CreateObject();ml_security_followup(&m,req);assert(cJSON_IsString(cJSON_GetObjectItem(req,"Followup")));cJSON_Delete(req);
  assert(auth(&m,"{\"Error\":\"denied\",\"MachineAuthorized\":true}")==-1);
  assert(auth(&m,"{\"MachineAuthorized\":true}")==0);
- m.security.peers_ready=true;m.security.peer_count=1;m.security.peers[0]=(ml_allowed_peer_t){0x64400002,0};
+ m.security.peers_ready=true;m.security.peer_count=1;m.security.peers[0]=(ml_allowed_peer_t){.ip=0x64400002,.expiry=0};
  map(&m,"{\"PacketFilter\":[]}");assert(!ml_security_packet(&p,false,&m));
  map(&m,"{\"PacketFilter\":[{\"SrcIPs\":[\"100.64.0.2/32\"],\"IPProto\":[6],\"DstPorts\":[{\"IP\":\"100.64.0.1\",\"Ports\":{\"First\":80,\"Last\":80}}]}]}");
  assert(ml_security_packet(&p,false,&m));h[23]=81;assert(!ml_security_packet(&p,false,&m));h[23]=80;

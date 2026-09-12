@@ -132,7 +132,7 @@ both backend TCP/8237 and incoming TCP/80 timed out. Control-plane
 Hardware acceptance of this repair remains pending; this debugging unit
 must not flash, reboot or open the device's serial port.
 
-### Data-path repair and known remaining blocker
+### Data-path repair and region routing
 
 Map endpoints are now DISCO candidates rather than active WG destinations.
 The first native BSD-socket connection starts with DERP. A direct handshake
@@ -142,14 +142,40 @@ Authenticated relayed input selects DERP for subsequent encrypted replies;
 the previous code restored a stale UDP endpoint after its DERP handshake
 response, which blackholed a relayed TCP SYN's SYN-ACK.
 
-A separate limitation remains: this client opens only its own home DERP
-connection (configured region 9 / Dallas). Read-only Tailscale status on the
-backend showed its home relay as Hong Kong and the device's as Dallas.
+The 0.2.2 client also opened only its own home DERP connection (configured
+region 9 / Dallas). Read-only Tailscale status on the backend showed its home
+relay as Hong Kong and the device's as Dallas.
 [Upstream DERP protocol documentation](https://github.com/tailscale/tailscale/blob/main/derp/README.md)
-explicitly specifies no routing between regions. Outgoing traffic to a peer
-in another region therefore needs a connection to that peer's home region;
-fixing the WG return path alone does **not** complete this data channel.
-Do not mark the hardware repair complete until cross-region routing and
-actual bidirectional HTTP are verified. Certificate rejection, reconnect,
+specifies no routing between regions. The repaired owner task keeps home
+pinned and opens at most **two** additional destination-region TLS sessions.
+The destination region comes from the current authorized peer snapshot;
+unknown regions fail explicitly rather than falling back to Dallas.
+
+Only WG traffic opens a new remote session. Background DISCO can reuse an
+existing connection but cannot allocate one per peer. Recent incoming
+traffic may reuse its live receiving session for replies (a 30-second
+transport hint, never an authentication or ACL grant). Each TLS context has
+exactly one owner for read, write, reconnect and free. Remote cleanup does
+not clear the home-connected event. Shutdown interrupts all three sockets
+and the owner releases every TLS context before its exit acknowledgement.
+
+The two remote slots are reused per region; a third active region increments
+`derp_capacity_drops`. A slot can be replaced after 60 seconds without WG
+transmit demand, using least-recently-used order. Connection failures back off
+1, 2, 4, 8, 16, then 30 seconds. Pending packets may be dropped during connect
+or backoff; WG/TCP retransmissions drive retry. Cold cross-region connections
+can therefore outlast an application's first short HTTP timeout.
+
+Budget three DERP TCP sockets out of the application's 20-socket limit.
+Use `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y` with the verified 8 MB PSRAM board;
+three TLS contexts plus control TLS otherwise consume substantial internal
+RAM (at least 20 KB of record buffers per TLS connection in this build).
+No additional task stacks or identities are created per region.
+
+The cached status exposes `derp_home_connected`, `derp_home_region`,
+`derp_remote_connected`, `derp_frames_tx`, `derp_frames_rx`,
+`derp_connect_failures`, `derp_capacity_drops`, `derp_queue_drops`, and
+`derp_route_drops`. These are transport diagnostics, not evidence of HTTP
+success. Actual bidirectional HTTP, certificate rejection, reconnect,
 manual reauth, expiry, revocation and memory headroom with the display active
-also remain hardware acceptance checks.
+still require hardware acceptance after integration.

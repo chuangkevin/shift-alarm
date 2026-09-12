@@ -25,6 +25,15 @@ static void publish(void) {
         next.peer_count=client->security.observed_peer_count;
         next.peer_capacity=ML_POLICY_MAX_PEERS;
         next.capacity_exceeded=client->security.capacity_exceeded;
+        next.derp_home_connected=client->security.derp_home_connected;
+        next.derp_home_region=client->security.derp_home_region;
+        next.derp_remote_connected=client->security.derp_remote_connected;
+        next.derp_frames_tx=client->security.derp_frames_tx;
+        next.derp_frames_rx=client->security.derp_frames_rx;
+        next.derp_connect_failures=client->security.derp_connect_failures;
+        next.derp_capacity_drops=client->security.derp_capacity_drops;
+        next.derp_queue_drops=client->security.derp_queue_drops;
+        next.derp_route_drops=client->security.derp_route_drops;
         if(next.capacity_exceeded)next.last_error=ESP_ERR_INVALID_SIZE;
         else if(client->security.peer_install_failed)next.last_error=ESP_ERR_NO_MEM;
         next.expires_at=client->security.expiry;

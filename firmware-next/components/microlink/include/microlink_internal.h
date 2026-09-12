@@ -1,3 +1,4 @@
+#include "ml_derp_cache.h"
 /**
  * @file microlink_internal.h
  * @brief MicroLink v2 Internal Types and Task Communication
@@ -193,6 +194,7 @@ typedef struct {
 /* DERP TX queue item - packet to send via DERP relay */
 typedef struct {
     uint8_t dest_pubkey[32];    /* Destination peer's public key */
+    bool demand; /* Only WG traffic can open a new region, not background DISCO. */
     uint8_t *data;              /* Heap-allocated payload (caller frees on failure) */
     size_t len;                 /* Payload length */
     uint8_t frame_type;         /* DERP frame type (0x04 = SendPacket) */
@@ -330,6 +332,8 @@ typedef struct {
  * ========================================================================== */
 
 typedef struct {
+    uint16_t region;
+    EventGroupHandle_t events; /* Shared shutdown signal, no TLS mutation by caller. */
     int sockfd;                     /* Raw TCP socket */
     mbedtls_ssl_context ssl;        /* TLS context (owned exclusively by DERP I/O task) */
     mbedtls_ssl_config ssl_conf;
@@ -380,7 +384,9 @@ struct microlink_s {
 
     /* DERP connection (owned exclusively by DERP I/O task after connect) */
     /* Connection setup by coord task, then handed to DERP I/O task */
-    ml_derp_conn_t derp;
+    ml_derp_conn_t derp; /* Pinned home receive connection. */
+    ml_derp_conn_t derp_remote[ML_DERP_REMOTE_SLOTS];
+    ml_derp_cache_slot_t derp_cache[ML_DERP_REMOTE_SLOTS];
 
     /* Sockets for net_io select() loop */
     int disco_sock4;                    /* UDP socket for DISCO + direct WG */

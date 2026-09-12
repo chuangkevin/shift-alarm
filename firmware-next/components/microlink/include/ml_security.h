@@ -12,7 +12,7 @@ typedef struct {
     uint8_t proto;
     uint64_t until_ms;
 } ml_flow_t;
-typedef struct { uint32_t ip; int64_t expiry; } ml_allowed_peer_t;
+typedef struct { uint32_t ip; int64_t expiry; uint8_t public_key[32]; uint16_t derp_region, derp_recv_region; uint64_t derp_recv_ms; } ml_allowed_peer_t;
 #ifdef ESP_PLATFORM
 #include "sdkconfig.h"
 #define ML_POLICY_MAX_PEERS CONFIG_ML_MAX_PEERS
@@ -32,6 +32,9 @@ typedef struct {
     ml_allowed_peer_t peers[ML_POLICY_MAX_PEERS];
     unsigned peer_count;
     ml_flow_t flows[16];
+    uint16_t derp_home_region, derp_remote_connected;
+    bool derp_home_connected;
+    uint32_t derp_frames_tx, derp_frames_rx, derp_connect_failures, derp_capacity_drops, derp_queue_drops, derp_route_drops;
 } ml_security_t;
 bool ml_security_init(struct microlink_s *ml);
 void ml_security_destroy(struct microlink_s *ml);

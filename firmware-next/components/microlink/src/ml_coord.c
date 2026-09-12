@@ -966,7 +966,7 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
          * then fall back to legacy DERP string (format: "127.3.3.40:REGION") */
         cJSON *home_derp = cJSON_GetObjectItem(node, "HomeDERP");
         if (home_derp && cJSON_IsNumber(home_derp) && home_derp->valueint > 0) {
-            ml->derp_home_region = (uint16_t)home_derp->valueint;
+            __atomic_store_n(&ml->derp_home_region, (uint16_t)home_derp->valueint, __ATOMIC_RELEASE);
             ESP_LOGI(TAG, "Home DERP region: %d (from server, HomeDERP)", ml->derp_home_region);
         } else {
             cJSON *self_derp = cJSON_GetObjectItem(node, "DERP");
@@ -976,7 +976,7 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
                 if (colon) {
                     int region = atoi(colon + 1);
                     if (region > 0) {
-                        ml->derp_home_region = (uint16_t)region;
+                        __atomic_store_n(&ml->derp_home_region, (uint16_t)region, __ATOMIC_RELEASE);
                         ESP_LOGI(TAG, "Home DERP region: %d (from server, legacy DERP)", region);
                     }
                 }
@@ -984,7 +984,7 @@ static int do_register(microlink_t *ml, ml_noise_state_t *noise) {
         }
         /* Fallback: if server didn't assign a DERP region, use our configured default */
         if (ml->derp_home_region == 0) {
-            ml->derp_home_region = ML_DERP_REGION;
+            __atomic_store_n(&ml->derp_home_region, ML_DERP_REGION, __ATOMIC_RELEASE);
             ESP_LOGI(TAG, "Home DERP region: %d (default)", ML_DERP_REGION);
         }
         cJSON *self_key = cJSON_GetObjectItem(node, "Key");
@@ -1421,7 +1421,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
              * then fall back to legacy DERP string (format: "127.3.3.40:REGION") */
             cJSON *home_derp = cJSON_GetObjectItem(node, "HomeDERP");
             if (home_derp && cJSON_IsNumber(home_derp) && home_derp->valueint > 0) {
-                ml->derp_home_region = (uint16_t)home_derp->valueint;
+                __atomic_store_n(&ml->derp_home_region, (uint16_t)home_derp->valueint, __ATOMIC_RELEASE);
                 ESP_LOGI(TAG, "Home DERP region: %d (from server, HomeDERP)", ml->derp_home_region);
             } else {
                 cJSON *self_derp = cJSON_GetObjectItem(node, "DERP");
@@ -1431,7 +1431,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
                     if (colon) {
                         int region = atoi(colon + 1);
                         if (region > 0) {
-                            ml->derp_home_region = (uint16_t)region;
+                            __atomic_store_n(&ml->derp_home_region, (uint16_t)region, __ATOMIC_RELEASE);
                             ESP_LOGI(TAG, "Home DERP region: %d (from server, legacy DERP)", region);
                         }
                     }
@@ -1439,7 +1439,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
             }
             /* Fallback: if server didn't assign a DERP region, use our configured default */
             if (ml->derp_home_region == 0) {
-                ml->derp_home_region = ML_DERP_REGION;
+                __atomic_store_n(&ml->derp_home_region, ML_DERP_REGION, __ATOMIC_RELEASE);
                 ESP_LOGI(TAG, "Home DERP region: %d (default)", ML_DERP_REGION);
             }
             cJSON *self_key = cJSON_GetObjectItem(node, "Key");
@@ -1462,6 +1462,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
     if (derp_map) {
         cJSON *regions = cJSON_GetObjectItem(derp_map, "Regions");
         if (regions) {
+            xSemaphoreTake(ml->security.lock,portMAX_DELAY);
             ml->derp_region_count = 0;
             cJSON *region_obj;
             cJSON_ArrayForEach(region_obj, regions) {
@@ -1533,6 +1534,7 @@ static int do_fetch_peers(microlink_t *ml, ml_noise_state_t *noise) {
                 ml->derp_region_count++;
             }
             ESP_LOGI(TAG, "DERPMap: parsed %d regions", ml->derp_region_count);
+            xSemaphoreGive(ml->security.lock);
         }
     }
 

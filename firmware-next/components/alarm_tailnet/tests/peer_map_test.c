@@ -14,9 +14,11 @@ static void initial(microlink_t *m){
 int main(void){
  microlink_t m={0};assert(ml_security_init(&m));initial(&m);
  assert(count==3&&pending[0]->action==ML_PEER_RESET&&pending[1]->action==ML_PEER_ADD&&pending[1]->node_id==7&&pending[2]->action==ML_PEER_SYNC_DONE);
- assert(!m.security.peers_ready&&m.security.peer_count==1);clear();
+ assert(!m.security.peers_ready&&m.security.peer_count==1);
+ assert(m.security.peers[0].derp_region==1&&!memcmp(m.security.peers[0].public_key,pending[1]->public_key,32));clear();
  assert(update(&m,"{\"PeersChangedPatch\":[{\"NodeID\":7,\"DERPRegion\":4,\"Endpoints\":[\"192.0.2.8:12345\"],\"Key\":\"nodekey:2222222222222222222222222222222222222222222222222222222222222222\"}]}"));
- assert(count==2&&pending[0]->action==ML_PEER_ADD&&pending[0]->node_id==7&&pending[0]->derp_region==4&&pending[0]->endpoint_count==1&&pending[0]->endpoints[0].port==12345&&pending[0]->public_key[0]==0x22);clear();
+ assert(count==2&&pending[0]->action==ML_PEER_ADD&&pending[0]->node_id==7&&pending[0]->derp_region==4&&pending[0]->endpoint_count==1&&pending[0]->endpoints[0].port==12345&&pending[0]->public_key[0]==0x22);
+ assert(m.security.peers[0].derp_region==4&&!memcmp(m.security.peers[0].public_key,pending[0]->public_key,32));clear();
  assert(update(&m,"{\"PeersChangedPatch\":[{\"NodeID\":999,\"DERPRegion\":3},{\"NodeID\":7,\"Online\":false}]}"));
  assert(count==1&&pending[0]->action==ML_PEER_SYNC_DONE);clear();
  assert(update(&m,"{\"PeersChangedPatch\":[{\"NodeID\":7,\"KeyExpiry\":\"2020-01-01T00:00:00Z\"}]}"));

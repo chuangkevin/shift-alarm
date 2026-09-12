@@ -128,7 +128,9 @@ bool ml_peer_map_update(microlink_t *ml,cJSON *map) {
         ml_peer_update_t value;int64_t expiry;
         if(!compile_node(node,&value,&expiry)){xSemaphoreGive(ml->security.lock);goto fail_next;}
         if(expiry&&time(NULL)>=expiry)continue;
-        ml->security.peers[ml->security.peer_count++]=(ml_allowed_peer_t){value.vpn_ip,expiry};
+        ml_allowed_peer_t *allowed=&ml->security.peers[ml->security.peer_count++];
+        *allowed=(ml_allowed_peer_t){.ip=value.vpn_ip,.expiry=expiry,.derp_region=value.derp_region};
+        memcpy(allowed->public_key,value.public_key,32);
     }
     xSemaphoreGive(ml->security.lock);
     if(reset) {ml_peer_update_t value={.action=ML_PEER_RESET};if(!enqueue(ml,&value))goto fail_next;}

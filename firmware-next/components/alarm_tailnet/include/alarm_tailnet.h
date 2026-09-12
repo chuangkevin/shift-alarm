@@ -18,6 +18,11 @@ typedef struct {
     esp_err_t last_error;
     uint16_t peer_count, peer_capacity;
     bool capacity_exceeded;
+    /* Transport diagnostics; control-plane CONNECTED alone does not prove TCP. */
+    bool derp_home_connected;
+    uint16_t derp_home_region, derp_remote_connected;
+    uint32_t derp_frames_tx, derp_frames_rx, derp_connect_failures;
+    uint32_t derp_capacity_drops, derp_queue_drops, derp_route_drops;
 } alarm_tailnet_status_t;
 esp_err_t alarm_tailnet_start(const char *device_name);
 esp_err_t alarm_tailnet_get_status(alarm_tailnet_status_t *out);

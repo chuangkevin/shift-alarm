@@ -147,6 +147,7 @@ microlink_t *microlink_init(const microlink_config_t *config) {
     ml->stun_sock = -1;
     ml->stun_sock6 = -1;
     ml->derp.sockfd = -1;
+    for(unsigned i=0;i<ML_DERP_REMOTE_SLOTS;i++)ml->derp_remote[i].sockfd=-1;
 
     /* Resolve timing (0 = use defaults from #defines) */
     ml->t_disco_heartbeat_ms = ml->config.disco_heartbeat_ms ? ml->config.disco_heartbeat_ms : ML_DISCO_HEARTBEAT_MS;
@@ -412,6 +413,8 @@ esp_err_t microlink_stop(microlink_t *ml) {
      * Timeout retains the context; never free memory used by a live task. */
     if(ml->coord_sock>=0)shutdown(ml->coord_sock,SHUT_RDWR);
     if(ml->derp.sockfd>=0)shutdown(ml->derp.sockfd,SHUT_RDWR);
+    for(unsigned i=0;i<ML_DERP_REMOTE_SLOTS;i++)
+        if(ml->derp_remote[i].sockfd>=0)shutdown(ml->derp_remote[i].sockfd,SHUT_RDWR);
     EventBits_t needed=0;
     if(ml->net_io_task)needed|=ML_EVT_NET_EXIT;
     if(ml->derp_tx_task)needed|=ML_EVT_DERP_EXIT;
