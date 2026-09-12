@@ -23,7 +23,7 @@
 #include "scheduler.h"
 #include "zh_glyphs.h"
 
-constexpr char VERSION[]="0.1.1";
+constexpr char VERSION[]="0.1.2";
 constexpr size_t MAX_ALARMS=512, MAX_JSON=98304;
 constexpr uint32_t POLL_MS=5000, RING_MS=180000;
 constexpr int BUTTON_STOP=0, BUTTON_SNOOZE=39, BUTTON_TEST=40;
@@ -176,7 +176,7 @@ void routes() {
   server.on("/display",HTTP_POST,[]{
     if(server.arg("nonce")!=setupNonce){server.send(403,"text/plain; charset=utf-8","請重新開啟設定頁");return;}
     String value=server.arg("rotation");if(value!="0"&&value!="1"&&value!="2"&&value!="3"){server.send(400,"text/plain; charset=utf-8","方向設定無效");return;}
-    displayRotation=value.toInt();prefs.putUChar("rotation",displayRotation);screen.setRotation(displayRotation);forceDraw=true;
+    uint8_t requested=value.toInt();if(prefs.putUChar("rotation",requested)!=1||prefs.getUChar("rotation",255)!=requested){server.send(500,"text/plain; charset=utf-8","儲存失敗，請重試；方向尚未變更");return;}displayRotation=requested;screen.setRotation(displayRotation);forceDraw=true;
     server.sendHeader("Location","/display");server.send(303,"text/plain","");
   });
   server.on("/wifi/reset",HTTP_POST,[]{
@@ -215,7 +215,7 @@ void pollBackend() {
 }
 void setup() {
   pinMode(21,OUTPUT);digitalWrite(21,HIGH); // Official board power latch.
-  Serial.begin(115200);if(psramFound())heap_caps_malloc_extmem_enable(4096); esp_err_t nvs=nvs_flash_init_partition("alarm_nvs");if(nvs==ESP_ERR_NVS_NO_FREE_PAGES||nvs==ESP_ERR_NVS_NEW_VERSION_FOUND){ESP_ERROR_CHECK(nvs_flash_erase_partition("alarm_nvs"));nvs=nvs_flash_init_partition("alarm_nvs");}ESP_ERROR_CHECK(nvs);prefs.begin("shift-alarm",false,"alarm_nvs");
+  Serial.begin(115200);if(psramFound())heap_caps_malloc_extmem_enable(4096); esp_err_t nvs=nvs_flash_init_partition("alarm_nvs");ESP_ERROR_CHECK(nvs);if(!prefs.begin("shift-alarm",false,"alarm_nvs")){Serial.println("SETTINGS_STORAGE_FAILED");abort();}
   char nonce[33];snprintf(nonce,sizeof(nonce),"%08lx%08lx%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random());setupNonce=nonce;lastCommand=prefs.getString("command");
   handled=prefs.getLong64("handled",0);snooze=prefs.getLong64("snooze",0);
   #ifdef PROVISION_BACKEND
@@ -237,7 +237,7 @@ void setup() {
   i2s_pin_config_t pins={};pins.mck_io_num=I2S_PIN_NO_CHANGE;pins.bck_io_num=15;pins.ws_io_num=16;pins.data_out_num=7;pins.data_in_num=I2S_PIN_NO_CHANGE;
   ESP_ERROR_CHECK(i2s_driver_install(I2S_NUM_0,&cfg,0,nullptr));ESP_ERROR_CHECK(i2s_set_pin(I2S_NUM_0,&pins));xTaskCreatePinnedToCore(soundTask,"speaker",3072,nullptr,2,nullptr,0);
   setenv("TZ","CST-8",1);tzset();WiFi.mode(WIFI_STA);WiFi.setAutoReconnect(true);if(ssid.length())WiFi.begin(ssid.c_str(),password.c_str());else startPortal();
-  configTime(8*3600,0,"pool.ntp.org","time.google.com");routes();bootMs=millis();lastPoll=millis()-POLL_MS;draw();Serial.println("SHIFT_ALARM_READY v0.1.1");Serial.printf("PSRAM_BYTES %u\n",ESP.getPsramSize());Serial.println(ssid.length()?"BOOT_WIFI_MODE SAVED":"BOOT_WIFI_MODE FIRST_SETUP");
+  configTime(8*3600,0,"pool.ntp.org","time.google.com");routes();bootMs=millis();lastPoll=millis()-POLL_MS;draw();Serial.println("SHIFT_ALARM_READY v0.1.2");Serial.printf("PSRAM_BYTES %u\n",ESP.getPsramSize());Serial.println(ssid.length()?"BOOT_WIFI_MODE SAVED":"BOOT_WIFI_MODE FIRST_SETUP");
 }
 void loop() {
   server.handleClient();if(portal)dns.processNextRequest();uint32_t ms=millis();time_t now=time(nullptr);

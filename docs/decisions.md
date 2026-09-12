@@ -7,3 +7,5 @@
 驗證：backend 8 tests pass；general真圖九月11上班日正確。韌體原16MB完整備份，board marker唯一xingzhi-cube-1.54tft-wifi。Reviewer找出容量/CSRF/remote command reboot去重已修。
 
 韌體0.1.1：離屏緩衝避免平時閃爍、響鈴才500ms紅黑閃；三鍵任意停鈴；＋與－同按十秒倒數配網，放開取消；斷網不自動進AP。裝置設定頁支援四個90度方向並保存；繁體中文點陣字型附OFL授權。
+
+韌體0.1.2：方向設定寫入NVS並讀回成功才套用；NVS異常不自動格式化或清除使用者設定。測試不得覆寫使用者正在操作的方向。

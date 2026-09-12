@@ -1,4 +1,4 @@
-# Shift Alarm firmware v0.1.1
+# Shift Alarm firmware v0.1.2
 
 ## Verified hardware
 
@@ -36,3 +36,5 @@ Do not flash another CUBE variant using these pins. Before upload, require a com
 - Backend `POST /api/device/heartbeat`: `{revision,status,next_alarm?,ip}`; status is `ready`, `waiting_for_time`, or `ringing`.
 
 The setup form is available only after entering setup mode. Setup credentials are kept in NVS. The setup AP password is shown physically and is generated per device. Schedule storage uses a 256 KB NVS partition and byte blobs; server timestamps and heartbeat metadata do not cause repeated schedule flash writes.
+
+Orientation is applied only after a successful NVS write and read-back. Startup storage errors stop startup without automatically erasing saved configuration.
