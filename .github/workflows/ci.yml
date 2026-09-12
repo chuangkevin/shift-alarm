@@ -45,6 +45,7 @@ jobs:
       - run: firmware-next/components/alarm_ota/tests/run_host_tests.sh
       - run: python firmware-next/components/alarm_ota/tests/test_manifest_contract.py
       - run: firmware-next/components/alarm_proxy/test/run_host_tests.sh
+      - run: sh firmware-next/components/microlink/test/run_host_tests.sh
       - run: sudo apt-get update && sudo apt-get install -y libcjson-dev pkg-config
       - run: firmware-next/components/alarm_tailnet/tests/run_host_tests.sh
       - run: firmware-next/patches/tests/run_host_tests.sh
