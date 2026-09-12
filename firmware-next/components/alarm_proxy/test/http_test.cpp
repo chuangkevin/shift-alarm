@@ -9,6 +9,9 @@ static std::string post(std::string extra) {
     return "POST /api/import HTTP/1.1\r\nHost: 192.168.18.55:8080\r\n"+extra+"\r\n";
 }
 int main() {
+    assert(!alarm_proxy::remote_path("/schedule"));assert(alarm_proxy::remote_path("/api/import"));assert(alarm_proxy::remote_path("/static/app.js"));
+    assert(!alarm_proxy::remote_path("/"));assert(!alarm_proxy::remote_path("/display"));assert(!alarm_proxy::remote_path("/calendar"));assert(!alarm_proxy::remote_path("/tailnet"));assert(!alarm_proxy::remote_path("/api/local-calendar?month=2026-07"));assert(!alarm_proxy::remote_path("/api/status"));assert(!alarm_proxy::remote_path("/api/device/firmware/test.bin"));
+
     unsigned status=0;
     assert(alarm_proxy::response_status("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n",status)&&status==403);
     assert(alarm_proxy::response_status("HTTP/1.0 200 OK\r\n\r\n",status)&&status==200);

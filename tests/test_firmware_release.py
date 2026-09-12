@@ -54,5 +54,7 @@ def test_no_release_is_not_an_error(tmp_path, monkeypatch):
 
 def test_local_proxy_qr_is_restricted_to_lan_addresses():
     assert client.get('/api/qr.svg', params={'url': 'http://192.168.18.160:8080'}).status_code == 200
-    for url in ['http://127.0.0.1:8080', 'http://0.0.0.0:8080', 'http://8.8.8.8:8080', 'http://192.168.1.1:80', 'https://192.168.1.1:8080', 'http://user@192.168.1.1:8080']:
+    assert client.get('/api/qr.svg', params={'url': 'http://192.168.18.160'}).status_code == 200
+    assert client.get('/api/qr.svg', params={'url': 'http://192.168.18.160:80'}).status_code == 200
+    for url in ['http://127.0.0.1:8080', 'http://0.0.0.0:8080', 'http://8.8.8.8:8080', 'http://192.168.1.1:8082', 'https://192.168.1.1:8080', 'http://user@192.168.1.1:8080']:
         assert client.get('/api/qr.svg', params={'url': url}).status_code == 422

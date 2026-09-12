@@ -27,7 +27,7 @@ void localCalendarRoutes(){
   if(list.size()+days.size()*times.size()>MAX_ALARMS){server.send(400,"text/plain; charset=utf-8","已超過裝置可儲存的 512 個鬧鐘，請先清除不需要的月份");return;}
   for(int day:days)for(const auto &t:times){int h,m;localcalendar::time(t.c_str(),h,m);auto a=list.add<JsonObject>();a["id"]=String("local-")+input["month"].as<String>()+"-"+day+"-"+t;a["label"]="上班鬧鐘";a["epoch"]=localcalendar::epoch(year,month,day,h,m);}
   if(next.overflowed()){server.send(500,"text/plain; charset=utf-8","班表設定記憶體不足，原設定未變更");return;}
-  String body,error;serializeJson(next,body);if(!applySchedule(body,true,error)){server.send(500,"text/plain; charset=utf-8",error);return;}syncState="本地班表已儲存";forceDraw=true;server.send(200,"application/json","{\"ok\":true}");
+  String body,error;serializeJson(next,body);if(!applySchedule(body,true,error)){server.send(500,"text/plain; charset=utf-8",error);return;}syncState="班表已儲存";forceDraw=true;server.send(200,"application/json","{\"ok\":true}");
  });
  server.on("/api/local-clock",HTTP_POST,[]{if(!localNonce()){return;}JsonDocument d;if(server.arg("plain").length()>128||deserializeJson(d,server.arg("plain"))||!d["epoch"].is<int64_t>()||d["epoch"].as<int64_t>()<1704067200||d["epoch"].as<int64_t>()>=4102444800LL){server.send(400,"text/plain; charset=utf-8","校時資料無效");return;}timeval tv={};tv.tv_sec=d["epoch"].as<int64_t>();settimeofday(&tv,nullptr);server.send(200,"application/json","{\"ok\":true}");});
 }

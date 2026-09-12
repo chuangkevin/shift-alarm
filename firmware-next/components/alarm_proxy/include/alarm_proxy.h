@@ -16,8 +16,9 @@ typedef struct {
     char lan_ip[16];
 } alarm_proxy_status_t;
 /* Main serializes init/start/stop. Init only while stopped and workers drained.
- * Bind only WIFI_STA_DEF's current IPv4, accept only same-subnet Wi-Fi peers.
- * Main must stop during AP setup. No credentials are stored or logged. */
+ * Port 80 gateway: local routes to loopback 8081, allowlisted cloud routes to
+ * fixed backend. Accept local subnets and ACL-filtered Tailnet traffic. Keep
+ * running during AP setup. No credentials are stored or logged. */
 esp_err_t alarm_proxy_init(const char *backend_ipv4, uint16_t backend_port);
 esp_err_t alarm_proxy_start(void);
 esp_err_t alarm_proxy_stop(void);

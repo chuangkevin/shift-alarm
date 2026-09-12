@@ -34,6 +34,7 @@ jobs:
           idf.py -C firmware-next build
           idf.py -C firmware-next size
           python firmware-next/patches/tests/test_patch.py
+          sh firmware-next/components/wireguard_lwip/test/run_host_tests.sh
   firmware-policies:
     runs-on: ubuntu-latest
     steps:
@@ -47,3 +48,6 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libcjson-dev pkg-config
       - run: firmware-next/components/alarm_tailnet/tests/run_host_tests.sh
       - run: firmware-next/patches/tests/run_host_tests.sh
+      - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/calendar_policy_test.cpp -o /tmp/calendar-test && /tmp/calendar-test
+      - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/scheduler_test.cpp -o /tmp/scheduler-test && /tmp/scheduler-test
+      - run: c++ -std=c++17 -Wall -Wextra -Werror -Ifirmware-next/components/arduino_libraries/ArduinoJson/src firmware-next/tests/calendar_metadata_test.cpp -o /tmp/calendar-meta-test && /tmp/calendar-meta-test

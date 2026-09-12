@@ -15,9 +15,9 @@
 #include <unistd.h>
 
 namespace {
-constexpr uint16_t LISTEN_PORT=8080;
+constexpr uint16_t LISTEN_PORT=80;
 constexpr unsigned MAX_CLIENTS=2;
-constexpr int64_t REQUEST_US=120LL*1000000;
+constexpr int64_t REQUEST_US=240LL*1000000;
 std::atomic<bool> enabled{false}, running{false}, listening{false};
 std::atomic<unsigned> generation{0}, clients{0}, completed{0}, rejected{0};
 std::atomic<uint32_t> bound_ip{0};
@@ -26,7 +26,7 @@ sockaddr_in upstream{};
 std::string authority;
 struct Session { int fd; unsigned generation; uint32_t local_ip; int64_t deadline; };
 bool live(const Session &s) { return enabled.load() && s.generation==generation.load() &&
-    s.local_ip==bound_ip.load() && esp_timer_get_time()<s.deadline; }
+    esp_timer_get_time()<s.deadline; }
 void close_fd(int fd) { if(fd>=0) { shutdown(fd,SHUT_RDWR); close(fd); } }
 void timeouts(int fd) {
     timeval tv{1,0};
@@ -55,10 +55,12 @@ std::string ip_string(uint32_t addr) {
     char text[INET_ADDRSTRLEN]{};
     in_addr a{};a.s_addr=addr;inet_ntop(AF_INET,&a,text,sizeof(text));return text;
 }
-int connect_upstream(const Session &s) {
+int connect_upstream(const Session &s,bool local) {
+    sockaddr_in destination=upstream;
+    if(local){destination.sin_addr.s_addr=htonl(INADDR_LOOPBACK);destination.sin_port=htons(8081);}
     int fd=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(fd<0)return -1;
     int flags=fcntl(fd,F_GETFL,0);fcntl(fd,F_SETFL,flags|O_NONBLOCK);
-    int result=connect(fd,reinterpret_cast<const sockaddr*>(&upstream),sizeof(upstream));
+    int result=connect(fd,reinterpret_cast<const sockaddr*>(&destination),sizeof(destination));
     if(result<0 && errno!=EINPROGRESS) {close_fd(fd);return -1;}
     const int64_t limit=esp_timer_get_time()+10LL*1000000;
     while(result<0 && live(s) && esp_timer_get_time()<limit) {
@@ -131,14 +133,26 @@ bool relay(Session &s) {
     }
     boundary+=4;
     alarm_proxy::Request request;
-    if(!alarm_proxy::rewrite_request(head.substr(0,boundary),ip_string(s.local_ip)+":8080",authority,request)) {
+    // Validate all framing before choosing a fixed route. Never proxy arbitrary destinations.
+    const std::string lan=ip_string(s.local_ip);
+    if(!alarm_proxy::rewrite_request(head.substr(0,boundary),lan,lan,request)) {
         error_response(s.fd,"400 Bad Request",s);return false;
     }
+    size_t first=request.header.find(' '),last=request.header.find(' ',first+1);
+    std::string path=request.header.substr(first+1,last-first-1);
+    request.local=!alarm_proxy::remote_path(path);
+    if(!request.local){
+        if(!alarm_proxy::rewrite_request(head.substr(0,boundary),lan,authority,request)){error_response(s.fd,"400 Bad Request",s);return false;}
+    }else if(request.content_length>98304){error_response(s.fd,"413 Payload Too Large",s);return false;}
     size_t buffered_body=head.size()-boundary;
     // Reject pipelining and bytes after the declared body before forwarding any data.
     if(buffered_body>request.content_length){error_response(s.fd,"400 Bad Request",s);return false;}
-    int remote=connect_upstream(s);
-    if(remote<0){error_response(s.fd,"502 Bad Gateway",s);return false;}
+    int remote=connect_upstream(s,request.local);
+    if(remote<0){
+      const std::string body=request.local?"裝置設定服務暫時無法回應，請稍後重試":"裝置無法連上班表辨識伺服器，請確認伺服器及資料通道；Tailscale 授權狀態不受影響。";
+      std::string response="HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: "+std::to_string(body.size())+"\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"+body;
+      send_all(s.fd,response.data(),response.size(),s);return false;
+    }
     bool ok=send_all(remote,request.header.data(),request.header.size(),s);
     if(buffered_body)std::memcpy(buffer,head.data()+boundary,buffered_body);
     uint64_t remaining=request.content_length-buffered_body;
@@ -166,37 +180,37 @@ bool sta(esp_netif_ip_info_t &ip) {
     auto *net=esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     return net && esp_netif_is_netif_up(net) && esp_netif_get_ip_info(net,&ip)==ESP_OK && ip.ip.addr && ip.netmask.addr;
 }
+bool accepted_peer(uint32_t destination,uint32_t source){
+ for(const char *key:{"WIFI_STA_DEF","WIFI_AP_DEF"}){
+  auto *net=esp_netif_get_handle_from_ifkey(key);esp_netif_ip_info_t ip{};
+  if(net&&esp_netif_is_netif_up(net)&&esp_netif_get_ip_info(net,&ip)==ESP_OK&&ip.ip.addr==destination&&ip.netmask.addr)
+   return (source&ip.netmask.addr)==(destination&ip.netmask.addr);
+ }
+ // Native WireGuard already applies the tailnet ACL to decrypted packets.
+ return (ntohl(destination)&0xffc00000u)==0x64400000u&&(ntohl(source)&0xffc00000u)==0x64400000u;
+}
 void listener(void *) {
-    int fd=-1;uint32_t current=0;
-    const unsigned epoch=generation.load();
+    int fd=-1;const unsigned epoch=generation.load();
     while(enabled.load() && generation.load()==epoch) {
-        esp_netif_ip_info_t ip{};
-        if(!sta(ip) || current!=ip.ip.addr) {close_fd(fd);fd=-1;current=0;bound_ip=0;listening=false;}
-        if(ip.ip.addr && ip.netmask.addr && fd<0) {
+        esp_netif_ip_info_t ip{};if(sta(ip))bound_ip=ip.ip.addr;else bound_ip=0;
+        if(fd<0){
             fd=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
-            if(fd>=0) {
-                int yes=1;setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
-                sockaddr_in local{};local.sin_family=AF_INET;local.sin_port=htons(LISTEN_PORT);local.sin_addr.s_addr=ip.ip.addr;
-                if(bind(fd,reinterpret_cast<sockaddr*>(&local),sizeof(local))<0 || listen(fd,MAX_CLIENTS)<0) {close_fd(fd);fd=-1;}
-                else {current=ip.ip.addr;bound_ip=current;listening=true;}
+            if(fd>=0){int yes=1;setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
+             sockaddr_in local{};local.sin_family=AF_INET;local.sin_port=htons(LISTEN_PORT);local.sin_addr.s_addr=htonl(INADDR_ANY);
+             if(bind(fd,reinterpret_cast<sockaddr*>(&local),sizeof(local))<0||listen(fd,MAX_CLIENTS)<0){close_fd(fd);fd=-1;}else listening=true;
             }
         }
         if(fd<0){vTaskDelay(pdMS_TO_TICKS(250));continue;}
         fd_set reads;FD_ZERO(&reads);FD_SET(fd,&reads);timeval tv{1,0};
         if(select(fd+1,&reads,nullptr,nullptr,&tv)<=0)continue;
-        sockaddr_in peer{};socklen_t length=sizeof(peer);int client=accept(fd,reinterpret_cast<sockaddr*>(&peer),&length);
-        if(client<0)continue;
-        // An IP-specific bind plus same-subnet source filter excludes tailnet/AP.
-        const uint32_t source=ntohl(peer.sin_addr.s_addr);
-        const bool tailnet=(source & 0xffc00000u)==0x64400000u;
-        if(tailnet || (peer.sin_addr.s_addr & ip.netmask.addr)!=(current & ip.netmask.addr) || clients.load()>=MAX_CLIENTS || !enabled.load()) {
+        sockaddr_in peer{},local{};socklen_t length=sizeof(peer);int client=accept(fd,reinterpret_cast<sockaddr*>(&peer),&length);
+        if(client<0){continue;}length=sizeof(local);
+        if(getsockname(client,reinterpret_cast<sockaddr*>(&local),&length)<0||!accepted_peer(local.sin_addr.s_addr,peer.sin_addr.s_addr)||clients.load()>=MAX_CLIENTS||!enabled.load()){
             rejected.fetch_add(1);close_fd(client);continue;
         }
-        timeouts(client);
-        auto *session=new(std::nothrow) Session{client,epoch,current,esp_timer_get_time()+REQUEST_US};
-        if(!session){close_fd(client);continue;}
-        clients.fetch_add(1);
-        if(xTaskCreate(worker,"alarm_proxy_io",8192,session,3,nullptr)!=pdPASS) {clients.fetch_sub(1);delete session;close_fd(client);}
+        timeouts(client);auto *session=new(std::nothrow) Session{client,epoch,local.sin_addr.s_addr,esp_timer_get_time()+REQUEST_US};
+        if(!session){close_fd(client);continue;}clients.fetch_add(1);
+        if(xTaskCreate(worker,"alarm_proxy_io",8192,session,3,nullptr)!=pdPASS){clients.fetch_sub(1);delete session;close_fd(client);}
     }
     close_fd(fd);bound_ip=0;listening=false;running=false;vTaskDelete(nullptr);
 }

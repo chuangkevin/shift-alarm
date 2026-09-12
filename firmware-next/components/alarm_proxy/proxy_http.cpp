@@ -40,6 +40,10 @@ bool response_status(const std::string &input, unsigned &status) {
     }
     return pos==input.size()-2;
 }
+bool remote_path(const std::string &target){
+ const auto path=target.substr(0,target.find('?'));
+ return path.compare(0,8,"/static/")==0||path=="/api/state"||path=="/api/import"||path=="/api/settings"||path=="/api/months"||path=="/api/qr.svg"||path=="/api/test-alarm"||path=="/api/device/stop";
+}
 bool rewrite_request(const std::string &input, const std::string &lan,
                      const std::string &backend, Request &out) {
     out = Request{};
@@ -69,7 +73,7 @@ bool rewrite_request(const std::string &input, const std::string &lan,
         if (name == "transfer-encoding" || name == "upgrade" || name == "expect") return false;
         if (name == "host" || name == "content-length" || name == "origin" || name == "x-alarm-ui")
             if (!unique.insert(name).second) return false;
-        if (name == "host") { if (value != lan) return false; host = true; }
+        if (name == "host") { if (value != lan && value != lan+":80") return false; host = true; }
         else if (name == "content-length") {
             if (value.empty()) return false;
             uint64_t n=0;
@@ -81,7 +85,7 @@ bool rewrite_request(const std::string &input, const std::string &lan,
         } else if (name == "proxy-connection" || name == "keep-alive" || name == "forwarded" || name.compare(0,12,"x-forwarded-") == 0 || name == "proxy-authorization") {
             // Never allow caller-supplied proxy metadata to affect backend trust.
         } else {
-            if (name == "origin" && value == "http://"+lan) value="http://"+backend;
+            if (name == "origin" && (value == "http://"+lan || value == "http://"+lan+":80")) value="http://"+backend;
             headers.emplace_back(name,value);
         }
         pos=end+2;

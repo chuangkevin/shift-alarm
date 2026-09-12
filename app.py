@@ -298,7 +298,7 @@ def qr(url: str | None = None):
         try:
             parsed = urlsplit(url)
             address = ipaddress.IPv4Address(parsed.hostname)
-            if len(url) > 128 or parsed.scheme != 'http' or parsed.port != 8080 or not any(address in ipaddress.IPv4Network(net) for net in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')) or parsed.username or parsed.password or parsed.path not in ('', '/') or parsed.query or parsed.fragment:
+            if len(url) > 128 or parsed.scheme != 'http' or parsed.port not in (None, 80, 8080) or not any(address in ipaddress.IPv4Network(net) for net in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')) or parsed.username or parsed.password or parsed.path not in ('', '/') or parsed.query or parsed.fragment:
                 raise ValueError('invalid local management URL')
             target = url
         except (ValueError, TypeError):

@@ -1,25 +1,28 @@
-# Alarm LAN proxy 0.1.0
+# Alarm HTTP gateway 0.2.3
 
-IDF 5.3 component. Initialize once with a fixed IPv4 backend/port, then start only
-after station Wi-Fi is available and AP provisioning has ended. Main serializes
-init/start/stop. `alarm_proxy_stop()` cancels listener and current sessions; they
-drain asynchronously within the socket timeout (normally one second). Restart
-returns `ESP_ERR_INVALID_STATE` until draining has completed; retry from main.
+Listens on port 80 on local network interfaces. Accepts same-subnet station/AP
+clients, and native Tailnet clients on the Tailnet destination (WireGuard ACLs
+apply before decrypted traffic reaches this listener). Validates Host against
+the actual destination IP, optionally with :80. It runs during initial pairing.
 
-Listens on **the current station IPv4 only, port 8080**, never `INADDR_ANY`.
-Station address changes trigger rebinding. Accepts same-subnet IPv4 peers and
-explicitly excludes Tailscale's 100.64/10 source range. No HTTP listener exists
-on the Tailscale or AP interface. Main must stop this component while AP setup is
-active. Status exposes only counters and the LAN address, no keys.
+Local routes /, /display, /calendar, /tailnet, /update and their APIs go only to
+127.0.0.1:8081. The internal server binds loopback and cannot be opened from LAN.
+/schedule redirects locally to /calendar. An explicit allowlist forwards AI
+APIs and backend assets; recognition errors remain inline in the unified calendar.
+Other paths remain local and yield a local 404. Backend connection failures
+return a Chinese 503 without discarding calendar edits. No browser link requires :8080.
 
-The browser visits `http://<device-LAN-IP>:8080/`. Host must match that exact
+Main serializes start/stop. Stop cancels sessions asynchronously via generation
+and deadline guards. IP-specific same-subnet admission is checked per accept.
+
+The browser visits http://<device-IP>/display. Host must match that IP
 authority, preventing DNS-rebinding hostnames. Backend Host is replaced with the
 fixed configured address. An Origin equal to that exact browser origin is
 rewritten to the backend origin; all other Origins remain unchanged. The proxy
 never adds X-Alarm-UI or credentials. Backend CSRF/device-token enforcement still
 applies. Forwarded proxy metadata is removed.
 
-At most two sessions; 120-second total session deadline. Requests have at most
+At most two sessions; 240-second total session deadline. Requests have at most
 16 KiB headers and 12 MiB body. Bodies stream through a 4 KiB buffer, including
 multipart uploads; no image is accumulated in RAM. Requests require unambiguous
 Content-Length framing; chunked requests, duplicate Content-Length/Host/Origin,
