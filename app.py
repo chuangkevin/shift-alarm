@@ -81,7 +81,7 @@ async def private_boundary(request: Request, call_next):
     if request.url.hostname not in ALLOWED_HOSTS:
         return JSONResponse({'detail': '不接受此主機名稱'}, status_code=400)
     path = request.url.path
-    device_route = path in ('/api/device/schedule', '/api/device/heartbeat')
+    device_route = path in ('/api/device/schedule', '/api/device/heartbeat', '/api/device/update') or path.startswith('/api/device/firmware/')
     if device_route:
         auth = request.headers.get('authorization', '')
         if not DEVICE_TOKEN or not hmac.compare_digest(auth, 'Bearer ' + DEVICE_TOKEN):
@@ -222,6 +222,53 @@ def device_schedule():
         return {'revision': get(c, 'revision'), 'timezone': str(TZ), 'alarms': schedule(c),
                 'management_url': MANAGEMENT_URL, 'server_time': int(time.time()),
                 'command': get(c, 'command')}
+
+FIRMWARE_BOARD = 'xingzhi-cube-1.54tft-wifi'
+
+def available_firmware():
+    """Only an operator-published immutable binary can become an update."""
+    release_dir = DATA / 'releases'
+    active = release_dir / 'active.json'
+    if not active.exists():
+        return None
+    try:
+        item = json.loads(active.read_text())
+        board, version, digest, size = (item[k] for k in ('board', 'version', 'sha256', 'size'))
+        if board != FIRMWARE_BOARD or not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', version):
+            raise ValueError('release identity')
+        if not re.fullmatch(r'[0-9a-f]{64}', digest) or type(size) is not int or not 256 <= size <= 4 * 1024 * 1024:
+            raise ValueError('release size or digest')
+        binary = release_dir / (digest + '.bin')
+        if binary.is_symlink() or binary.stat().st_size != size:
+            raise ValueError('release file')
+        raw = binary.read_bytes()
+        if raw[0] != 0xe9 or int.from_bytes(raw[12:14], 'little') != 9 or hashlib.sha256(raw).hexdigest() != digest:
+            raise ValueError('release image')
+        # ESP-IDF app descriptor after the 24-byte image and 8-byte segment headers.
+        if int.from_bytes(raw[32:36], 'little') != 0xabcd5432:
+            raise ValueError('app descriptor')
+        image_version = raw[48:80].split(b'\0', 1)[0].decode('ascii')
+        image_board = raw[80:112].split(b'\0', 1)[0].decode('ascii')
+        if image_version != version or image_board != board:
+            raise ValueError('binary identity mismatch')
+        canonical = f'{board}\n{version}\n{size}\n{digest}\n'.encode()
+        return {'board': board, 'version': version, 'size': size, 'sha256': digest,
+                'hmac_sha256': hmac.new(DEVICE_TOKEN.encode(), canonical, hashlib.sha256).hexdigest(),
+                'path': f'/api/device/firmware/{digest}.bin'}
+    except (OSError, ValueError, KeyError, TypeError, UnicodeError) as e:
+        raise HTTPException(503, '更新檔尚未通過驗證，原有韌體不受影響') from e
+
+@app.get('/api/device/update')
+def firmware_update():
+    release = available_firmware()
+    return {'available': release is not None, 'manifest': release}
+
+@app.get('/api/device/firmware/{digest}.bin')
+def firmware_binary(digest: str):
+    release = available_firmware()
+    if not release or digest != release['sha256']:
+        raise HTTPException(404, '找不到此更新版本')
+    return FileResponse(DATA / 'releases' / (digest + '.bin'), media_type='application/octet-stream')
 
 @app.post('/api/device/heartbeat')
 def heartbeat(body: Heartbeat):
