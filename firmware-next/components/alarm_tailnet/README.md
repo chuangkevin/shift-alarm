@@ -206,3 +206,26 @@ Output/inbound counters run at the plaintext policy boundary; raw RX counts
 include WG handshake packets. These contain no keys or payloads. The owner
 copies netif/peer state under core→policy lock order; HTTP reads only a cached
 snapshot. Real bidirectional HTTP still needs validation after integration.
+
+### ESP-IDF callback compatibility (required)
+
+Use `CONFIG_LWIP_PPP_SUPPORT=y` and rebuild **all** IDF components. In IDF
+5.3 this selects `LWIP_ESP_NETIF_DATA=1`, reserving a separate client-data slot
+for the SDK's `esp_netif_t` pointer. The custom WG interface leaves that slot
+NULL, so global DHCP/IPv6 callbacks ignore it while its `state` remains owned
+by WireGuard. PPP support here does not create a PPP instance; cellular remains
+disabled. A per-source macro override is unsafe because it changes netif ABI.
+
+The 0.2.4 hardware backtrace showed `netif_add` → `netif_set_addr` → SDK DHCP
+callback dereferencing WG state as `esp_netif_t` when client-data separation
+was disabled. The native component now rejects that configuration at compile
+time. The earlier minimal lwIP routing test did not include ESP-netif's global
+callback, so it could not detect this integration failure.
+
+Run `IDF_PATH=/path/to/esp-idf python3 ../microlink/test/test_esp_netif_callback.py`
+from this directory. It compiles the actual SDK configuration selection,
+getter and complete DHCP callback with controlled event/IP dependencies:
+the unsafe configuration trips UBSan, the separated slot safely ignores custom
+driver state, and a real ESP-netif fixture still receives its IP-change event.
+The compile guard is tested in both configurations. This remains a host
+regression; the corrected full firmware requires forward hardware validation.

@@ -37,3 +37,7 @@ CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
 
 # Keep multi-region TLS sessions out of scarce internal RAM; N16R8 has verified PSRAM.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# Reserve ESP-netif client_data; custom WG netif->state is not esp_netif_t.
+# Enables SDK support only; no PPP/cellular instance is created.
+CONFIG_LWIP_PPP_SUPPORT=y

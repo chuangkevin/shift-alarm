@@ -18,6 +18,7 @@
 #include "esp_netif.h"
 #include "lwip/sockets.h"
 #include "lwip/netif.h"
+#include "ml_netif_compat.h"
 #include "lwip/pbuf.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/ip_addr.h"
