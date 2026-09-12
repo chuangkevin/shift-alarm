@@ -500,6 +500,8 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 				// Decrypt the packet
 				memset(pbuf->payload, 0, pbuf->tot_len);
 				bool decrypt_ok = wireguard_decrypt_packet(pbuf->payload, src, src_len, nonce, keypair);
+                static unsigned auth_fail_logs=0;
+                if(!decrypt_ok && auth_fail_logs++<8)printf("[WG_DIAG] data authentication failed bytes=%u\n",(unsigned)src_len);
 				WG_DEBUG("[WG_DECRYPT] result=%d, src_len=%u, nonce=%llu\n",
 				       decrypt_ok, (unsigned)src_len, (unsigned long long)nonce);
 				if (decrypt_ok) {
@@ -874,7 +876,7 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
 			if (peer) {
 				// header is 16 bytes long so take that off the length
 				wireguardif_process_data_message(device, peer, msg_data, len - 16, addr, port);
-			}
+			}else{static unsigned missing_logs=0;if(missing_logs++<8)printf("[WG_DIAG] data receiver not found\n");}
 			break;
 
 		default:
