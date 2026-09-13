@@ -5,7 +5,7 @@
 ## 前置條件
 
 - 裝置與操作電腦均已加入 Tailnet；ACL 允許電腦到裝置 TCP 80、裝置到後端 TCP 8237。
-- 已安裝的韌體須固定使用原生 Tailscale 後端，`/api/status` 回報 `backendTransport: "tailscale"` 與 `backendHost: "100.126.226.79"`。缺少此資訊的旧版會遭工具拒絕，不能以 LAN 通道代替。這是現存版本的 bootstrap 限制，不能只靠待安裝版本新增此欄位。
+- 已安裝的韌體須固定使用原生 Tailscale 後端，`/api/status` 回報 `backendTransport: "tailscale"` 與 `backendHost: "100.126.226.79"`。缺少此資訊的舊版會遭工具拒絕，不能以 LAN 通道代替。這是現存版本的 bootstrap 限制，不能只靠待安裝版本新增此欄位。
 - 已完成新版審查、測試與應用程式建置；版本必須遞增。使用 `deploy/publish_firmware.py` 在後端私有 `data/releases` 目錄發布應用程式映像，詳見 `更新部署.md`。發布和安裝是兩個獨立動作。
 - `DEVICE_TOKEN` 放在私有檔案（權限 `0600`），不放命令列、Git 或公開附件。帶 token 的編譯映像亦不可公開。
 - 穩定供電、時鐘與排程已恢復，未響鈴、未貪睡，五分鐘內無鬧鐘。工具檢查可見狀態，韌體在寫入與啟動前仍會再次檢查完整 guard。
@@ -34,7 +34,7 @@ OTA 元件只將映像寫到備用 app partition，驗證後切換啟動；NVS�
 
 2026-09-13 已從 0.3.1 經裝置原生 Tailscale 完整安裝 0.3.2：預檢、1,564,240 位元組下載、SHA-256／HMAC 驗證、備用分區啟動、Tailnet 回連及保存班表驗收均通過。另在實機設定 1 分鐘關屏，確認關屏後時鐘與 11 筆鬧鐘仍保留；測試鬧鐘會喚醒螢幕並響鈴，停止後排程未改動，最後恢復永久開啟。
 
-回退依賴 bootstrap 安装的回退引導程式、雙 OTA 分區與有效舊映像。開機自測確認硬體初始化、NVS 排程恢復與本機服務；它不保證外部 Tailscale 服務當時可達。命令完成後的資料通道檢查補上此項驗收，但不是硬體測試報告。
+回退依賴 bootstrap 安裝的回退引導程式、雙 OTA 分區與有效舊映像。開機自測確認硬體初始化、NVS 排程恢復與本機服務；它不保證外部 Tailscale 服務當時可達。命令完成後的資料通道檢查補上此項驗收，但不是硬體測試報告。
 
 ## 開發驗證
 
@@ -43,7 +43,7 @@ python3 -m unittest discover -s deploy/tests -v
 sh firmware-next/components/alarm_ota/tests/run_host_tests.sh
 ```
 
-工具測試以假的 API 回應驗證拒絕規則、HMAC 與預檢唯讀性；不是實機 OTA 或真實 WireGuard/TLS 傳输驗證。尚未執行實機更新時，不得把 host 測試或成功編譯記為 OTA 成功。
+工具測試以假的 API 回應驗證拒絕規則、HMAC 與預檢唯讀性；不是實機 OTA 或真實 WireGuard/TLS 傳輸驗證。尚未執行實機更新時，不得把 host 測試或成功編譯記為 OTA 成功。
 
 
 下載最多十分鐘；三十秒沒有成功寫入的新資料就中止。OTA 元件從 begin 到 activate 的總期限同為十分鐘，包含下載前準備與驗證，因此可用下載時間略少於十分鐘。`/api/update` 的 `received`／`total` 為已成功寫入與預期的位元組數，介面顯示百分比，錯誤區分總期限、停滯、連線與寫入／安全檢查。工具在舊版仍運行且更新已停止時提早結束，不重試 POST。此修正不推定先前未具進度資訊的失敗一定由超時造成。
