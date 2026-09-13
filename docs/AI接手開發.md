@@ -1,0 +1,87 @@
+# AI 接手開發
+
+這份文件讓新的 AI 在只收到「請確認 alarm-shift 後接手開發」時，可以自行辨認專案、確認現況並安全接續。正式儲存庫名稱是 `shift-alarm`；`alarm-shift` 是使用者可能使用的別名。
+
+## 現況基準
+
+- GitHub：`git@github.com:chuangkevin/shift-alarm.git`，預設分支 `main`。
+- 實機韌體：0.3.2，已由 0.3.1 經原生 Tailscale OTA 完整驗收。
+- 後端：0.1.0，部署於 `rpi-matrix:/home/kevin/DockerCompose/shift-alarm`。
+- 目前韌體原始碼：`firmware-next/`，ESP-IDF 5.3.2 / Arduino 3.1.3。
+- `firmware/` 是歷史版本，只供追查，不是更新來源。
+- 裝置後端固定為 Tailscale 位址 `100.126.226.79:8237`。裝置自己的 Tailscale IP 可能因重新授權而改變，部署前必須讀取當下狀態，不可只抄舊紀錄。
+
+0.3.2 的已驗收功能包括：首次 QR 配網、換 Wi-Fi、port 80 統一介面、本機月曆與時／分選擇器、圖片辨識草稿、每三小時校時與手動校時、四方向旋轉、持久關屏時間與永久開啟、BOOT 關屏、任一鍵喚醒／停鈴、鬧鐘強制亮屏及 Tailscale OTA。詳細證據在 `README.md`、`docs/更新部署.md` 與 `docs/Tailscale-OTA.md`。
+
+## 接手後立即執行
+
+```sh
+git status --short --branch
+git remote -v
+git fetch origin
+git log --oneline --decorate -5
+git rev-list --left-right --count HEAD...origin/main
+python3 tools/audit_public_repo.py
+
+if [ ! -x .venv312/bin/python ]; then
+  if command -v uv >/dev/null; then
+    uv venv --python 3.12 .venv312
+  else
+    python3.12 -m venv .venv312
+  fi
+fi
+if command -v uv >/dev/null; then
+  uv pip install --python .venv312/bin/python -r requirements.txt
+else
+  .venv312/bin/python -m pip install -r requirements.txt
+fi
+.venv312/bin/python -m pytest -q
+.venv312/bin/python -m unittest discover -s deploy/tests -v
+sh firmware-next/components/alarm_ota/tests/run_host_tests.sh
+node --check static/app.js
+```
+
+若已載入 ESP-IDF 5.3.2，再執行：
+
+```sh
+idf.py -C firmware-next build
+idf.py -C firmware-next size
+```
+
+先讀取所有命令結果。若工作樹已有變更，保留並判斷來源；不可 `reset --hard`、`clean -fd` 或用遠端覆蓋。若遠端領先，先理解差異後以 fast-forward 或 rebase 整合。測試或建置失敗時，不發布韌體。
+
+## 系統資料流
+
+```text
+手機 ──同一 Wi-Fi / HTTP 80──> ESP32
+                                  │
+                                  └──原生 Tailscale──> 私有後端 :8237 ──> New API / Gemini
+```
+
+手機不必加入 Tailnet。ESP32 必須自行加入 Tailnet，才能使用 AI 圖片辨識與 OTA。手動月曆及鬧鐘直接保存在裝置，即使 Tailscale 未連線也可操作與響鈴。
+
+## 私密檔案邊界
+
+下列檔案可能存在於開發機，但已被 Git 排除：
+
+- `.env`
+- `firmware-next/main/provisioning.h`
+- `firmware/src/provisioning.h`
+- `data/`
+- `firmware-next/build/`
+- `firmware/.pio/`
+
+不可讀出或貼出其中秘密來「確認設定」。只確認檔案是否存在、權限是否正確及 Git 是否忽略。公開儲存庫只能保存 `provisioning.example.h` 的假值。新增設定時，同步更新 `.gitignore`、範本和這份清單。
+
+## 開發與交付定義
+
+每一項變更至少要做到：
+
+1. 保留上面的資料流與離線能力，新增的使用者文字為繁體中文。
+2. 加入能證明行為的必要測試；不要用只複製實作內容的測試湊數。
+3. 執行相關 host 測試與完整後端測試；韌體改動完成 ESP-IDF 建置。
+4. 提高韌體版本，且只把無憑證建置視為公開產物。實機映像保持私有。
+5. 若使用者要求部署，嚴格依 `docs/更新部署.md` 與 `docs/Tailscale-OTA.md`；先預檢，再一次安裝，最後驗收保存資料與實體功能。
+6. 更新 README、PLAN 與部署紀錄，提交後用 SSH 推送；確認 `HEAD`、`origin/main` 與 GitHub 公開頁面的 commit 一致。
+
+沒有明確新需求時，以 `PLAN.md` 第一個仍適用的未完成工作為預設。若清單為空，只進行唯讀健康檢查並回報，不任意更改實機。

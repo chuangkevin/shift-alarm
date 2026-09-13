@@ -25,7 +25,7 @@ typedef struct microlink_s microlink_t;
 
 /* Configuration */
 typedef struct {
-    const char *auth_key;       /* Tailscale auth key (tskey-auth-...) */
+    const char *auth_key;       /* Tailscale authentication key */
     const char *device_name;    /* Device hostname on the tailnet */
     bool enable_derp;           /* Enable DERP relay (default: true) */
     bool enable_stun;           /* Enable STUN endpoint discovery */

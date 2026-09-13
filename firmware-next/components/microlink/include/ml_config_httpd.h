@@ -50,7 +50,7 @@ typedef struct __attribute__((packed)) {
     /* --- v1 fields (do NOT reorder) --- */
     char     wifi_ssid[33];         /* 32 chars + null */
     char     wifi_pass[65];         /* 64 chars + null */
-    char     auth_key[96];          /* tskey-auth-... + null */
+    char     auth_key[96];          /* Tailscale authentication key + null */
     char     device_prefix[32];     /* e.g. "sensor" → becomes "sensor-a1b2c3" */
     char     cellular_apn[32];
     char     cellular_sim_pin[16];

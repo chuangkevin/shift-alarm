@@ -8,6 +8,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - run: python tools/audit_public_repo.py
       - run: pip install -r requirements.txt
       - run: python -m pytest -q
       - run: python -m unittest discover -s deploy/tests -v

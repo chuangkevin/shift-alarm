@@ -1,5 +1,7 @@
 # 班表鬧鐘
 
+> AI 接手：本專案也可能被稱為 `alarm-shift`。新的 AI 只收到「請確認 alarm-shift 後接手開發」時，先讀 [AGENTS.md](AGENTS.md) 與 [AI 接手開發](docs/AI接手開發.md)，再依 [PLAN.md](PLAN.md) 接續；不要使用過時的 0.2.x 紀錄猜測現況。
+
 ESP32-S3 星智 CUBE 1.54 吋獨立鬧鐘。班表與響鈴設定保存在裝置；手機在裝置網頁編輯月曆，也可經裝置的原生 Tailscale 上傳圖片至私有辨識服務。
 
 新版韌體位於 `firmware-next/`。0.3.1 已於 2026-09-13 用 USB 部署並驗證；0.3.2 加入持久化關屏設定及實體鍵關屏／喚醒，並已透過 Tailscale OTA 安裝。後端版本為 0.1.0。
