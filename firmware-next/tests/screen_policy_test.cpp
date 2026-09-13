@@ -3,6 +3,14 @@
 #include <cstdint>
 
 int main() {
+  assert(screenpolicy::validBrightness(10));
+  assert(screenpolicy::validBrightness(40));
+  assert(screenpolicy::validBrightness(100));
+  assert(!screenpolicy::validBrightness(0));
+  assert(!screenpolicy::validBrightness(50));
+  assert(screenpolicy::brightnessDuty(10) == 26);
+  assert(screenpolicy::brightnessDuty(40) == 102);
+  assert(screenpolicy::brightnessDuty(100) == 255);
   using screenpolicy::shouldTurnOff;
   using screenpolicy::validTimeout;
 

@@ -102,6 +102,12 @@ def verify_after(after, before, native, device, backend):
     if ('screenTimeoutMinutes' in before
             and after.get('screenTimeoutMinutes') != before['screenTimeoutMinutes']):
         raise ValueError('Saved screen timeout changed')
+    if ('screenBrightness' in before
+            and after.get('screenBrightness') != before['screenBrightness']):
+        raise ValueError('Saved screen brightness changed')
+    if ('firstConsecutiveOnly' in before
+            and after.get('firstConsecutiveOnly') != before['firstConsecutiveOnly']):
+        raise ValueError('Saved consecutive-workday setting changed')
     if before.get('localSchedule') is True:
         for key in ('revision', 'alarmCount'):
             if key not in before or after.get(key) != before[key]:

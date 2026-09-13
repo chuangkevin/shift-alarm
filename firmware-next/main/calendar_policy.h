@@ -29,4 +29,7 @@ inline int64_t epoch(int y,int m,int d,int h,int min){
  const unsigned doe=yo*365+yo/4-yo/100+doy;
  return (int64_t(era)*146097+doe-719468)*86400+h*3600+min*60-28800;
 }
+inline bool shouldNotify(int64_t workDate,const std::set<int64_t> &allWorkDates,bool firstConsecutiveOnly){
+ return !firstConsecutiveOnly||allWorkDates.count(workDate-86400)==0;
+}
 }

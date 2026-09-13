@@ -11,10 +11,16 @@ int main(){
  assert(epoch(2026,7,5,7,0)==1783206000LL);
  assert(epoch(2026,7,5,7,10)-epoch(2026,7,5,7,0)==600);
  assert(epoch(2024,3,1,0,0)-epoch(2024,2,28,0,0)==172800);
+ const std::set<int64_t> workDates={epoch(2026,8,31,0,0),epoch(2026,9,1,0,0),epoch(2026,9,2,0,0),epoch(2026,9,5,0,0)};
+ assert(shouldNotify(epoch(2026,8,31,0,0),workDates,true));
+ assert(!shouldNotify(epoch(2026,9,1,0,0),workDates,true));
+ assert(!shouldNotify(epoch(2026,9,2,0,0),workDates,true));
+ assert(shouldNotify(epoch(2026,9,5,0,0),workDates,true));
+ assert(shouldNotify(epoch(2026,9,1,0,0),workDates,false));
  assert(!mixedTimes({}));
  assert(!mixedTimes({{13,420},{14,420}}));
  assert(!mixedTimes({{13,420},{13,480},{14,420},{14,480}}));
  assert(mixedTimes({{13,420},{14,480}}));
  assert(mixedTimes({{13,420},{13,480},{14,420}}));
- std::cout<<"Calendar date, leap year, time and Taiwan epoch checks passed\n";
+ std::cout<<"Calendar date, consecutive workday, time and Taiwan epoch checks passed\n";
 }

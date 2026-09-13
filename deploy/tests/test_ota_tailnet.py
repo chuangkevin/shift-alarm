@@ -83,7 +83,7 @@ class Tests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ota.preflight(f, 'http://100.90.212.116', 'http://100.126.226.79:8237', 'test-secret', '0.2.8')
     def test_post_update_transport_identity_and_local_schedule(self):
-        before = {'rotation': 90, 'screenTimeoutMinutes': 15,
+        before = {'rotation': 90, 'screenTimeoutMinutes': 15, 'screenBrightness': 25, 'firstConsecutiveOnly': True,
                   'localSchedule': True, 'revision': 'saved', 'alarmCount': 4}
         after = dict(before, backendTransport='tailscale', backendHost='100.126.226.79')
         native = {'connected': True, 'acl_ready': True, 'ip': '100.90.212.116'}
@@ -91,7 +91,7 @@ class Tests(unittest.TestCase):
             return ota.verify_after(after, before, native, 'http://100.90.212.116', 'http://100.126.226.79:8237')
         self.assertTrue(check())
         for key, bad in [('backendTransport', 'lan'), ('backendHost', '192.168.18.31'),
-                         ('rotation', 0), ('screenTimeoutMinutes', 5),
+                         ('rotation', 0), ('screenTimeoutMinutes', 5), ('screenBrightness', 100), ('firstConsecutiveOnly', False),
                          ('revision', 'lost'), ('alarmCount', 0)]:
             old = after[key]; after[key] = bad
             with self.assertRaises(ValueError): check()

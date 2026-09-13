@@ -10,6 +10,12 @@ client = TestClient(app.app)
 UI = {'X-Alarm-UI': '1'}
 DEV = {'Authorization': 'Bearer test-device-token'}
 
+def test_recognition_token_budget_has_safe_minimum():
+    assert app.recognition_token_budget('50') == 400
+    assert app.recognition_token_budget('400') == 400
+    assert app.recognition_token_budget('800') == 800
+    assert app.recognition_token_budget('invalid') == 6000
+
 def month(m='2026-09'):
     return {'month': m, 'days': [{'date': d, 'source_label': '上班' if d.endswith('-13') else '休假', 'classification': 'work' if d.endswith('-13') else 'off'} for d in sorted(app.month_dates(m))]}
 
@@ -62,6 +68,12 @@ def test_revision_heartbeat_and_single_test_alarm():
     client.post('/api/test-alarm', headers=UI)
     client.post('/api/test-alarm', headers=UI)
     assert len(client.get('/api/device/schedule', headers=DEV).json()['alarms']) == 1
+
+def test_backend_root_redirects_to_device_calendar():
+    client.post('/api/device/heartbeat', json={'revision': 'abc', 'status': 'online', 'ip': '192.168.18.160'}, headers=DEV)
+    response = client.get('/', follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers['location'] == 'http://192.168.18.160/calendar'
 
 def test_month_boundaries_leap_year():
     assert len(app.month_dates('2028-02')) == 29

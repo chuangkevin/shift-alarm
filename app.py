@@ -24,12 +24,12 @@ import httpx
 import qrcode
 import qrcode.image.svg
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-VERSION = '0.1.0'
+VERSION = '0.1.2'
 TZ = ZoneInfo('Asia/Taipei')
 DATA = Path(os.environ.get('ALARM_DATA', './data'))
 DATA.mkdir(parents=True, exist_ok=True)
@@ -40,6 +40,14 @@ DEVICE_TOKEN = os.environ.get('DEVICE_TOKEN', '')
 NEWAPI_URL = os.environ.get('NEWAPI_URL', 'https://newapi.sisihome.org/v1').rstrip('/')
 NEWAPI_KEY = os.environ.get('NEWAPI_KEY', '')
 NEWAPI_MODEL = os.environ.get('NEWAPI_MODEL', 'gemini-flash')
+
+def recognition_token_budget(value: str) -> int:
+    try:
+        return max(400, int(value))
+    except ValueError:
+        return 6000
+
+NEWAPI_MAX_TOKENS = recognition_token_budget(os.environ.get('NEWAPI_MAX_TOKENS', '6000'))
 MAX_UPLOAD = 10 * 1024 * 1024
 MAX_ALARMS = 512
 ALLOWED_HOSTS = set(os.environ.get('ALLOWED_HOSTS', '127.0.0.1,localhost,alarm.sisihome.org,192.168.18.31,100.126.226.79,testserver').split(','))
@@ -332,7 +340,7 @@ async def recognize(raw, month):
 不根據顏色單獨猜，讀取文字。圈選日期不是上班標記。無法看清仍列該日但標review。
 只輸出JSON：{"month":"YYYY-MM","days":[{"date":"YYYY-MM-DD","source_label":"原文或不清楚","classification":"work|off|review"}]}。
 必須有完整當月28到31天，無重複，勿加入解釋、markdown、其他欄位。使用者選擇月份為 ''' + month
-    payload = {'model': NEWAPI_MODEL, 'temperature': 0, 'max_tokens': 6000,
+    payload = {'model': NEWAPI_MODEL, 'temperature': 0, 'max_tokens': NEWAPI_MAX_TOKENS,
                'response_format': {'type': 'json_object'},
                'messages': [{'role': 'system', 'content': prompt}, {'role': 'user', 'content': [
                    {'type': 'text', 'text': '請逐格擷取完整班表。'},
@@ -397,8 +405,22 @@ async def import_month(file: UploadFile = File(...), month: str = Form(...)):
             c.execute('INSERT INTO drafts VALUES (?,?)', (draft_id, json.dumps(draft)))
         return draft
 
+def device_calendar_url():
+    with database() as c:
+        value = get(c, 'device', {}).get('ip')
+    try:
+        address = ipaddress.ip_address(value)
+    except (ValueError, TypeError):
+        raise HTTPException(503, '尚未收到裝置的區網位址') from None
+    if address.version != 4 or not address.is_private:
+        raise HTTPException(503, '裝置尚未回報有效的區網位址')
+    return f'http://{address}/calendar'
+
 @app.get('/')
+@app.get('/calendar')
 def index():
-    return FileResponse(Path(__file__).parent / 'static' / 'index.html')
+    # The ESP32 owns the user interface and data. This backend only provides
+    # recognition, heartbeat and private firmware services.
+    return RedirectResponse(device_calendar_url(), status_code=307)
 
 app.mount('/static', StaticFiles(directory=Path(__file__).parent / 'static'), name='static')

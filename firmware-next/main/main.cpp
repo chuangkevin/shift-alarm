@@ -51,7 +51,7 @@ bool connecting=false, setupFailed=false, showJoinQr=true;
 uint32_t connectStarted=0,apCloseAt=0;
 String lastCommand;
 bool tailnetStarted=false,proxyStarted=false;
-bool savedScheduleRestored=true, deviceRoutesReady=false, localSchedule=false;
+bool savedScheduleRestored=true, deviceRoutesReady=false, localSchedule=false, firstConsecutiveOnly=false;
 std::atomic<bool> speakerReady{false};
 uint32_t tailnetAttempt=0;
 // Prevent Arduino from confirming a pending image before application diagnostics.
@@ -81,15 +81,16 @@ Adafruit_SSD1306 screen(128,64,&Wire,-1);
 
 uint8_t displayRotation=0;
 uint16_t screenTimeoutMinutes=0;
+uint8_t screenBrightness=40;
 bool screenAwake=true;
 uint32_t screenLastActivity=0;
 bool forceDraw=true;
 uint32_t previousFrameHash=0;
 
 constexpr char DISPLAY_SETTINGS_KEY[]="display-v1";
-bool saveDisplaySettings(uint8_t rotation,uint16_t timeoutMinutes){
-  if(rotation>3||!screenpolicy::validTimeout(timeoutMinutes))return false;
-  const uint8_t blob[]={ 'D',1,rotation,uint8_t(timeoutMinutes),uint8_t(timeoutMinutes>>8) };
+bool saveDisplaySettings(uint8_t rotation,uint16_t timeoutMinutes,uint8_t brightness){
+  if(rotation>3||!screenpolicy::validTimeout(timeoutMinutes)||!screenpolicy::validBrightness(brightness))return false;
+  const uint8_t blob[]={ 'D',2,rotation,uint8_t(timeoutMinutes),uint8_t(timeoutMinutes>>8),brightness };
   if(prefs.putBytes(DISPLAY_SETTINGS_KEY,blob,sizeof(blob))!=sizeof(blob)||prefs.getBytesLength(DISPLAY_SETTINGS_KEY)!=sizeof(blob))return false;
   uint8_t verified[sizeof(blob)]={};
   return prefs.getBytes(DISPLAY_SETTINGS_KEY,verified,sizeof(verified))==sizeof(verified)&&memcmp(blob,verified,sizeof(blob))==0;
@@ -97,19 +98,31 @@ bool saveDisplaySettings(uint8_t rotation,uint16_t timeoutMinutes){
 void loadDisplaySettings(){
   displayRotation=prefs.getUChar("rotation",prefs.getBool("flipped",false)?2:0)%4;
   screenTimeoutMinutes=0;
+  screenBrightness=40;
   if(prefs.isKey(DISPLAY_SETTINGS_KEY)){
-    uint8_t blob[5]={};
-    if(prefs.getBytesLength(DISPLAY_SETTINGS_KEY)==sizeof(blob)&&prefs.getBytes(DISPLAY_SETTINGS_KEY,blob,sizeof(blob))==sizeof(blob)&&
-       blob[0]=='D'&&blob[1]==1&&blob[2]<=3){
+    const size_t length=prefs.getBytesLength(DISPLAY_SETTINGS_KEY);uint8_t blob[6]={};
+    if((length==5||length==sizeof(blob))&&prefs.getBytes(DISPLAY_SETTINGS_KEY,blob,length)==length&&
+       blob[0]=='D'&&(blob[1]==1||blob[1]==2)&&blob[2]<=3){
       uint16_t timeout=uint16_t(blob[3])|(uint16_t(blob[4])<<8);
-      if(screenpolicy::validTimeout(timeout)){displayRotation=blob[2];screenTimeoutMinutes=timeout;}
+      uint8_t brightness=length==sizeof(blob)?blob[5]:40;
+      if(screenpolicy::validTimeout(timeout)&&screenpolicy::validBrightness(brightness)){
+        displayRotation=blob[2];screenTimeoutMinutes=timeout;screenBrightness=brightness;
+        if(length==5)saveDisplaySettings(displayRotation,screenTimeoutMinutes,screenBrightness);
+      }
     }
-  }else saveDisplaySettings(displayRotation,screenTimeoutMinutes);
+  }else saveDisplaySettings(displayRotation,screenTimeoutMinutes,screenBrightness);
+}
+bool backlightPwm=false;
+void setBacklight(bool awake){
+#if CUBE_TFT
+  if(backlightPwm)ledcWrite(13,awake?screenpolicy::brightnessDuty(screenBrightness):0);
+  else digitalWrite(13,awake?HIGH:LOW);
+#endif
 }
 void setScreenAwake(bool awake){
   if(screenAwake==awake)return;
 #if CUBE_TFT
-  if(awake){screen.enableDisplay(true);digitalWrite(13,HIGH);}else{digitalWrite(13,LOW);screen.enableDisplay(false);}
+  if(awake){screen.enableDisplay(true);setBacklight(true);}else{setBacklight(false);screen.enableDisplay(false);}
 #else
   screen.ssd1306_command(awake?SSD1306_DISPLAYON:SSD1306_DISPLAYOFF);
 #endif
@@ -239,6 +252,9 @@ bool applySchedule(const String &body,bool persist,String &error) {
   if(body.length()>MAX_JSON){error="班表資料過大";return false;}
   JsonDocument doc; if(deserializeJson(doc,body)){error="資料格式無效";return false;}
   if(!doc["revision"].is<String>()||doc["revision"].as<String>().isEmpty()||doc["timezone"]!="Asia/Taipei"||!doc["alarms"].is<JsonArray>()||doc["alarms"].size()>MAX_ALARMS){error="班表欄位不完整";return false;}
+  const JsonVariantConst firstOnlySetting=doc["first_consecutive_only"];
+  if(!firstOnlySetting.isNull()&&!firstOnlySetting.is<bool>()){error="連續上班通知設定無效";return false;}
+  bool nextFirstConsecutiveOnly=firstOnlySetting.is<bool>()?firstOnlySetting.as<bool>():false;
   JsonDocument nextMonths;
   if(doc.as<JsonObjectConst>().containsKey("months")){
     if(!localcalendar::validMonths(doc["months"])) {error="月份設定格式無效或超過 120 個月";return false;}
@@ -252,12 +268,12 @@ bool applySchedule(const String &body,bool persist,String &error) {
     next.push_back({a["id"].as<String>(),a["label"].as<String>(),a["epoch"].as<int64_t>()});
   }
   std::sort(next.begin(),next.end(),[](const Alarm&a,const Alarm&b){return a.epoch<b.epoch;});
-  JsonDocument saved;saved["revision"]=doc["revision"];saved["timezone"]=doc["timezone"];saved["alarms"]=doc["alarms"];saved["source"]=doc["source"]=="local"?"local":"remote";saved["months"]=nextMonths;String canonical;serializeJson(saved,canonical);
+  JsonDocument saved;saved["revision"]=doc["revision"];saved["timezone"]=doc["timezone"];saved["alarms"]=doc["alarms"];saved["source"]=doc["source"]=="local"?"local":"remote";saved["months"]=nextMonths;saved["first_consecutive_only"]=nextFirstConsecutiveOnly;String canonical;serializeJson(saved,canonical);
   if(saved.overflowed()||canonical.length()>MAX_JSON){error="班表資料過大";return false;}
   if(persist&&savedSchedule()!=canonical&&prefs.putBytes("schedule",canonical.c_str(),canonical.length())!=canonical.length()){error="儲存失敗";return false;}
   if(persist&&savedSchedule()!=canonical){error="儲存驗證失敗，請重試";return false;}
   calendarMonths=std::move(nextMonths);
-  localSchedule=doc["source"]=="local";alarms=std::move(next);revision=doc["revision"].as<String>();
+  localSchedule=doc["source"]=="local";firstConsecutiveOnly=nextFirstConsecutiveOnly;alarms=std::move(next);revision=doc["revision"].as<String>();
   // Authenticated LAN server also provides time if outbound NTP is unavailable.
   if(persist && !clockValid() && doc["server_time"].is<int64_t>() && doc["server_time"].as<int64_t>()>=alarmclock::VALID_CLOCK) {
     timeval tv={};tv.tv_sec=doc["server_time"].as<int64_t>();settimeofday(&tv,nullptr);
@@ -279,7 +295,7 @@ String devicePage(String content) {
   else {int meta;while((meta=content.indexOf("<meta"))>=0){int end=content.indexOf('>',meta);if(end<0)break;content.remove(meta,end-meta+1);}}
   return String(R"PAGE(<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#152b42"><title>班表鬧鐘・裝置設定</title><style>
 :root{color-scheme:light;font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;color:#152b42;background:#f6f7f3}*{box-sizing:border-box}[hidden]{display:none!important}input[type=checkbox]{width:20px;height:20px;margin-right:8px}body{margin:0;padding:32px 20px 64px;font-size:16px;line-height:1.65}header,main,footer{width:100%;max-width:720px;margin:auto}header{display:flex;align-items:center;gap:14px;margin-bottom:28px}.brand-icon{display:grid;place-items:center;background:#152b42;color:#a8ead6;border-radius:16px;width:52px;height:52px;font-size:32px}.brand small{display:block;color:#668078;font-size:12px;letter-spacing:.08em}.brand strong{font-size:24px;letter-spacing:.02em}.badge{margin-left:auto;background:#e2f1e9;border:1px solid #cce3d6;color:#34614f;border-radius:30px;padding:6px 12px;font-size:12px}.card{background:#fff;border:1px solid #e0e5df;border-radius:24px;box-shadow:0 8px 32px #152b4207;padding:30px}h1{font-size:28px;line-height:1.3;margin:0 0 20px;letter-spacing:-.03em}h2{font-size:21px;border-top:1px solid #e6eae5;padding-top:28px;margin-top:32px}p{color:#63716c;margin:16px 0}form{margin:16px 0 20px}label{display:block;font-weight:600;margin-top:16px}input:not([type=hidden]):not([type=checkbox]),select{display:block;width:100%;min-height:50px;border:1px solid #ced8d1;border-radius:12px;background:#fafcf9;color:#152b42;font:inherit;padding:12px 14px;margin:8px 0 18px}input:focus,select:focus{outline:3px solid #a6dfce;outline-offset:2px}button,.primary-link{display:inline-block;border:0;border-radius:12px;background:#152b42;color:white;font:inherit;font-weight:600;padding:13px 20px;min-height:48px;cursor:pointer;text-align:center}button:hover{background:#28455e}button:active{transform:translateY(1px)}a{color:#276453;text-underline-offset:4px}a.primary-link{color:white;text-decoration:none;display:block}#status:not(:empty){background:#eaf5ee;border-radius:14px;padding:16px;overflow-wrap:anywhere}footer{text-align:center;color:#819087;font-size:12px;padding-top:24px}.help{font-size:13px}@media(max-width:480px){body{padding:22px 14px 40px}.card{padding:22px 20px;border-radius:20px}h1{font-size:25px}.badge{display:none}button{width:100%}}
-.calendar{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:5px;text-align:center}.calendar button{min-height:42px;padding:5px;border-radius:9px;background:#edf1ee;color:#152b42;width:100%;font-size:16px}.calendar button.workday{background:#152b42;color:#a8ead6}.calendar button.reviewday{background:#ffe4b1;color:#714800}.calendar button:disabled{opacity:.6}.time-row{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px;align-items:center;margin:12px 0}.time-row label,.time-row select{margin:0!important}.time-row select{padding:10px 6px!important}.time-row button{padding:10px;min-height:48px;width:auto}.secondary{background:#e9efec;color:#274c42}.secondary:hover{background:#dce8e1}.upload-box{padding:16px;background:#f1f6f2;border:1px dashed #b9d0c4;border-radius:12px}.time-row strong{font-size:14px}#ai-status{overflow-wrap:anywhere}button:disabled{cursor:wait;opacity:.6}#weekdays{margin-bottom:10px;color:#63716c}
+.calendar{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:5px;text-align:center}.calendar button{min-height:42px;padding:5px;border-radius:9px;background:#edf1ee;color:#152b42;width:100%;font-size:16px}.calendar button.workday{background:#152b42;color:#a8ead6}.calendar button.silent-workday{background:#fff;color:#152b42;border:2px solid #152b42}.calendar button.reviewday{background:#ffe4b1;color:#714800}.calendar button:disabled{opacity:.6}.time-row{display:grid;grid-template-columns:auto minmax(0,1fr) minmax(0,1fr) auto auto;gap:8px;align-items:center;margin:12px 0}.time-row label,.time-row select{margin:0!important}.time-row select{padding:10px 6px!important}.time-row button{padding:10px;min-height:48px;width:auto}.alarm-enable{display:flex!important;align-items:center;gap:5px;white-space:nowrap}.alarm-enable input{margin:0}.secondary{background:#e9efec;color:#274c42}.secondary:hover{background:#dce8e1}.upload-box{padding:16px;background:#f1f6f2;border:1px dashed #b9d0c4;border-radius:12px}.check-option{display:flex;align-items:center;gap:8px;padding:14px 0}.check-option input{flex:0 0 auto;margin:0}.time-row strong{font-size:14px}#ai-status{overflow-wrap:anywhere}button:disabled{cursor:wait;opacity:.6}#weekdays{margin-bottom:10px;color:#63716c}@media(max-width:600px){.time-row{grid-template-columns:1fr 1fr auto}.time-row strong{grid-column:1/-1}.alarm-enable{grid-column:1/3}}
 </style><header><div class="brand-icon">◷</div><div class="brand"><small>每個上班日，準時提醒</small><strong>班表鬧鐘</strong></div><span class="badge">裝置設定</span></header><main><section class="card">)PAGE")+content+"</section></main><footer>設定保存在你的裝置 · 重新開機仍會保留</footer></html>";
 }
 bool localNonce();
@@ -338,15 +354,25 @@ void otaWorker(void*){
     strlcpy(manifest.board,board,sizeof(manifest.board));strlcpy(manifest.version,version,sizeof(manifest.version));strlcpy(manifest.sha256,sha,sizeof(manifest.sha256));strlcpy(manifest.hmac_sha256,mac,sizeof(manifest.hmac_sha256));manifest.size=m["size"];
     otaTotal.store(manifest.size);
     err=alarm_ota_begin(&manifest,&otaSession,&handle);if(err!=ESP_OK){otaMessageSet("更新遭拒：請確認版本、排程與電源");break;}
-    h.begin(backend+"/api/device/firmware/"+manifest.sha256+".bin");h.addHeader("Authorization",String("Bearer ")+token);
+    const String firmwareUrl=backend+"/api/device/firmware/"+manifest.sha256+".bin";
+    h.begin(firmwareUrl);h.addHeader("Authorization",String("Bearer ")+token);
     if(h.GET()!=200||h.getSize()!=int(manifest.size)){otaMessageSet("更新檔大小或回應不正確");break;}
-    auto *stream=h.getStreamPtr();uint8_t buffer[4096];size_t received=0;uint32_t started=millis(),lastProgress=started;const char *failure=nullptr;
+    auto *stream=h.getStreamPtr();uint8_t buffer[4096];size_t received=0;uint8_t reconnects=0;uint32_t started=millis(),lastProgress=started;const char *failure=nullptr;
     otaMessageSet("正在下載並驗證，請保持供電");
     while(received<manifest.size){
       auto limit=alarm_download::deadline(millis(),started,lastProgress);
-      if(limit!=alarm_download::Deadline::none){failure=limit==alarm_download::Deadline::total?"下載超過十分鐘，保留原有版本":"下載三十秒沒有進度，保留原有版本";break;}
+      if(limit==alarm_download::Deadline::total){failure="下載超過十分鐘，保留原有版本";break;}
       int available=stream->available();
-      if(available<=0){if(!h.connected()){failure="下載連線中斷，保留原有版本";break;}vTaskDelay(pdMS_TO_TICKS(1));continue;}
+      if(available<=0&&(limit==alarm_download::Deadline::idle||!h.connected())){
+        if(!alarm_download::mayReconnect(reconnects)){failure="下載多次中斷，保留原有版本";break;}
+        reconnects++;h.end();h.setConnectTimeout(3000);h.setTimeout(5000);h.begin(firmwareUrl);
+        h.addHeader("Authorization",String("Bearer ")+token);h.addHeader("Range",String("bytes=")+received+"-");
+        const char *rangeHeaders[]={"Content-Range"};h.collectHeaders(rangeHeaders,1);
+        const int code=h.GET();const String expectedRange=String("bytes ")+received+"-"+(manifest.size-1)+"/"+manifest.size;
+        if(code!=HTTP_CODE_PARTIAL_CONTENT||h.getSize()!=int(manifest.size-received)||h.header("Content-Range")!=expectedRange){failure="無法安全續傳更新檔，保留原有版本";break;}
+        stream=h.getStreamPtr();lastProgress=millis();continue;
+      }
+      if(available<=0){vTaskDelay(pdMS_TO_TICKS(1));continue;}
       size_t need=std::min(sizeof(buffer),std::min(size_t(available),size_t(manifest.size-received)));
       int n=stream->read(buffer,need);
       if(n<=0||alarm_ota_write(handle,&otaSession,buffer,size_t(n))!=ESP_OK){failure="更新寫入或安全檢查失敗，保留原有版本";break;}
@@ -386,9 +412,9 @@ String tailnetDetail(const alarm_tailnet_status_t &t){
 }
 void tailnetRoutes(){
   server.on("/tailnet",HTTP_GET,[]{
-    String page=R"HTML(<h1>Tailscale</h1><p>裝置會自己加入你的Tailscale，換環境後只要設定新的無線網路即可重新連線。</p><div id="status">正在取得連線狀態…</div><p id="address"></p><p id="expiry"></p><a id="approve" class="primary-link" hidden target="_blank" rel="noopener noreferrer">前往Tailscale 官方頁面登入授權</a><form id="join"><button>加入／重新授權</button></form><p class="help">帳號密碼只輸入在官方登入頁，裝置不會收取密碼。授權頁需要網際網路；手機可切換到行動網路完成登入。</p><a href="/display">返回裝置設定</a><script>
+    String page=R"HTML(<h1>Tailscale</h1><p>本頁所有時間固定使用臺北時間（UTC+8）。</p><p>裝置會自己加入你的Tailscale，換環境後只要設定新的無線網路即可重新連線。</p><div id="status">正在取得連線狀態…</div><p id="address"></p><p id="expiry"></p><a id="approve" class="primary-link" hidden target="_blank" rel="noopener noreferrer">前往Tailscale 官方頁面登入授權</a><form id="join"><button>加入／重新授權</button></form><p class="help">帳號密碼只輸入在官方登入頁，裝置不會收取密碼。授權頁需要網際網路；手機可切換到行動網路完成登入。</p><a href="/display">返回裝置設定</a><script>
 const nonce='NONCE',statusEl=document.querySelector('#status'),link=document.querySelector('#approve');
-async function refresh(){try{const r=await fetch('/api/tailnet',{headers:{'X-Setup-Nonce':nonce}});if(!r.ok)throw Error();const d=await r.json();statusEl.textContent=d.label+"。"+d.detail;document.querySelector('#address').textContent=d.ip?'Tailscale 位址：'+d.ip:'';document.querySelector('#expiry').textContent=d.expires_at>0?'授權有效期限：'+new Date(d.expires_at*1000).toLocaleString('zh-TW'):'';link.hidden=true;if(d.auth_url){const u=new URL(d.auth_url);if(u.protocol==='https:'&&u.hostname==='login.tailscale.com'){link.href=u.href;link.hidden=false;}}}catch(e){statusEl.textContent='無法取得狀態，請確認仍連上裝置網路。'}}
+async function refresh(){try{const r=await fetch('/api/tailnet',{headers:{'X-Setup-Nonce':nonce}});if(!r.ok)throw Error();const d=await r.json();statusEl.textContent=d.label+"。"+d.detail;document.querySelector('#address').textContent=d.ip?'Tailscale 位址：'+d.ip:'';document.querySelector('#expiry').textContent=d.expires_at>0?'授權有效期限：'+new Date(d.expires_at*1000).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'}):'';link.hidden=true;if(d.auth_url){const u=new URL(d.auth_url);if(u.protocol==='https:'&&u.hostname==='login.tailscale.com'){link.href=u.href;link.hidden=false;}}}catch(e){statusEl.textContent='無法取得狀態，請確認仍連上裝置網路。'}}
 document.querySelector('#join').onsubmit=async(e)=>{e.preventDefault();try{const r=await fetch('/api/tailnet/join',{method:'POST',headers:{'X-Setup-Nonce':nonce}});statusEl.textContent=r.ok?'正在準備 Tailscale 授權…':await r.text();}catch(e){statusEl.textContent='Tailscale 授權請求失敗，請確認仍連上裝置網路，再重試。'}};refresh();setInterval(refresh,3000);
 </script>)HTML";page.replace("NONCE",setupNonce);server.send(200,"text/html; charset=utf-8",devicePage(page));
   });
@@ -420,23 +446,27 @@ void routes() {
   });
   const char *headers[]={"Authorization","X-Setup-Nonce"}; server.collectHeaders(headers,2);tailnetRoutes();otaRoutes();localCalendarRoutes();
   server.on("/api/clock",HTTP_GET,[]{JsonDocument d;d["ready"]=clockValid();d["last_sync"]=lastNetworkClock.load();d["interval_seconds"]=CLOCK_SYNC_INTERVAL_MS/1000;d["overdue"]=lastNetworkClock.load()?millis()-lastNetworkClockMs.load()>CLOCK_SYNC_INTERVAL_MS+300000:millis()-bootMs>120000;String out;serializeJson(d,out);server.send(200,"application/json",out);});
-  server.on("/api/status",HTTP_GET,[]{ JsonDocument d; d["version"]=VERSION;d["backendTransport"]=backend=="http://100.126.226.79:8237"?"tailscale":"unsupported";d["backendHost"]=backend=="http://100.126.226.79:8237"?"100.126.226.79":"";d["localSchedule"]=localSchedule;d["rotation"]=displayRotation*90;d["screenTimeoutMinutes"]=screenTimeoutMinutes;d["screenAwake"]=screenAwake; d["revision"]=revision;d["clockReady"]=clockValid();d["epoch"]=time(nullptr);d["ringing"]=ringing;d["wifi"]=WiFi.isConnected();d["alarmCount"]=alarms.size();d["sync"]=syncState;String out;serializeJson(d,out);server.send(200,"application/json",out); });
+  server.on("/api/status",HTTP_GET,[]{ JsonDocument d; d["version"]=VERSION;d["backendTransport"]=backend=="http://100.126.226.79:8237"?"tailscale":"unsupported";d["backendHost"]=backend=="http://100.126.226.79:8237"?"100.126.226.79":"";d["localSchedule"]=localSchedule;d["firstConsecutiveOnly"]=firstConsecutiveOnly;d["rotation"]=displayRotation*90;d["screenTimeoutMinutes"]=screenTimeoutMinutes;d["screenBrightness"]=screenBrightness;d["screenAwake"]=screenAwake; d["revision"]=revision;d["clockReady"]=clockValid();d["epoch"]=time(nullptr);d["ringing"]=ringing;d["wifi"]=WiFi.isConnected();d["alarmCount"]=alarms.size();d["sync"]=syncState;String out;serializeJson(d,out);server.send(200,"application/json",out); });
   server.on("/display",HTTP_GET,[]{
     String page=String("<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>裝置設定</title><style>body{font:20px system-ui;padding:24px}button,select{font:20px system-ui;padding:12px;margin:12px 0}</style><h1>裝置設定</h1><a class='primary-link' href='/calendar'>設定班表與鬧鐘</a><h2>螢幕</h2><form method='post' action='/display'><input type='hidden' name='nonce' value='")+setupNonce+"'><label for='rotation'>顯示方向</label><select id='rotation' name='rotation'>";
     for(int r=0;r<4;r++)page+=String("<option value='")+r+"'"+(displayRotation==r?" selected":"")+">"+r*90+"°"+(r==0?"（正常）":r==2?"（上下顛倒）":"")+"</option>";
     page+="</select><label for='screen-timeout'>閒置多久後關閉螢幕</label><select id='screen-timeout' name='screen_timeout'>";
     const uint16_t timeouts[]={0,1,5,15,30,60};
     for(uint16_t minutes:timeouts)page+=String("<option value='")+minutes+"'"+(screenTimeoutMinutes==minutes?" selected":"")+">"+(minutes?String(minutes)+" 分鐘":"永久開啟")+"</option>";
-    page+="</select><button>儲存螢幕設定</button></form><p>非響鈴時短按機殼頂部中間按鈕可立即關屏；關屏後按任一按鈕即可喚醒。鬧鐘到點會自動亮屏並正常響鈴，響鈴時按任一按鈕即可停止。</p><h2>時鐘校對</h2><p>每三小時自動透過網路校時，重新開機及恢復網路後也會由網路時間服務重試。</p><a href='/clock'>手動調整時鐘</a><p id='clock-status'>正在讀取校時狀態…</p><script>async function clockStatus(){const el=document.querySelector('#clock-status');try{const r=await fetch('/api/clock');if(!r.ok)throw Error();const d=await r.json();el.textContent=d.last_sync?'最近網路校時：'+new Date(d.last_sync*1000).toLocaleString('zh-TW')+(d.overdue?'。校時已逾期，請檢查網際網路連線。':'。每三小時自動校對。'):d.overdue?'網路校時尚未成功，請檢查網際網路連線，或到班表頁使用手機校時。':'等待首次網路校時…';}catch(e){el.textContent='無法取得校時狀態，請確認裝置連線。'}}clockStatus();setInterval(clockStatus,10000)</script><h2>韌體更新</h2><p>下載已發布版本，保留舊版供失敗時回復。</p><a href='/update'>檢查裝置更新</a><h2>Tailscale連線</h2><p>登入授權，讓裝置在不同環境仍能同步班表。</p><a href='/tailnet'>設定Tailscale</a><h2>更換無線網路</h2><p>按下後裝置會開啟配網熱點，掃描螢幕條碼即可重新選擇網路。原設定會保留到新網路連線成功。</p><form method='post' action='/wifi/reset'><input type='hidden' name='nonce' value='"+setupNonce+"'><button>重新設定無線網路</button></form><p>無法連上此頁時，可同時按住「＋」與「－」十秒，啟動配網。</p><a href='/'>返回</a>";
+    page+="</select><label for='brightness'>螢幕亮度</label><select id='brightness' name='brightness'>";
+    const uint8_t brightnessLevels[]={10,25,40,60,80,100};
+    for(uint8_t percent:brightnessLevels)page+=String("<option value='")+percent+"'"+(screenBrightness==percent?" selected":"")+">"+percent+"%</option>";
+    page+="</select><p>降低亮度可減少背光耗電與發熱。</p><button>儲存螢幕設定</button></form><p>非響鈴時短按機殼頂部中間按鈕可立即關屏；關屏後按任一按鈕即可喚醒。鬧鐘到點會依設定亮度自動亮屏並正常響鈴，響鈴時按任一按鈕即可停止。</p><h2>時鐘校對</h2><p>固定使用臺北時間（UTC+8）；每三小時自動透過網路校時，重新開機及恢復網路後也會由網路時間服務重試。</p><a href='/clock'>手動調整時鐘</a><p id='clock-status'>正在讀取校時狀態…</p><script>async function clockStatus(){const el=document.querySelector('#clock-status');try{const r=await fetch('/api/clock');if(!r.ok)throw Error();const d=await r.json();el.textContent=d.last_sync?'最近網路校時：'+new Date(d.last_sync*1000).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})+(d.overdue?'。校時已逾期，請檢查網際網路連線。':'。每三小時自動校對。'):d.overdue?'網路校時尚未成功，請檢查網際網路連線，或到班表頁使用手機校時。':'等待首次網路校時…';}catch(e){el.textContent='無法取得校時狀態，請確認裝置連線。'}}clockStatus();setInterval(clockStatus,10000)</script><h2>韌體更新</h2><p>下載已發布版本，保留舊版供失敗時回復。</p><a href='/update'>檢查裝置更新</a><h2>Tailscale連線</h2><p>登入授權，讓裝置在不同環境仍能同步班表。</p><a href='/tailnet'>設定Tailscale</a><h2>更換無線網路</h2><p>按下後裝置會開啟配網熱點，掃描螢幕條碼即可重新選擇網路。原設定會保留到新網路連線成功。</p><form method='post' action='/wifi/reset'><input type='hidden' name='nonce' value='"+setupNonce+"'><button>重新設定無線網路</button></form><p>無法連上此頁時，可同時按住「＋」與「－」十秒，啟動配網。</p><a href='/'>返回</a>";
     server.send(200,"text/html; charset=utf-8",devicePage(page));
   });
   server.on("/display",HTTP_POST,[]{
     if(server.arg("nonce")!=setupNonce){server.send(403,"text/plain; charset=utf-8","請重新開啟設定頁");return;}
-    String value=server.arg("rotation"),timeoutValue=server.arg("screen_timeout");if(value!="0"&&value!="1"&&value!="2"&&value!="3"){server.send(400,"text/plain; charset=utf-8","方向設定無效");return;}
-    uint8_t requested=value.toInt();uint16_t requestedTimeout=timeoutValue.toInt();
+    String value=server.arg("rotation"),timeoutValue=server.arg("screen_timeout"),brightnessValue=server.arg("brightness");if(value!="0"&&value!="1"&&value!="2"&&value!="3"){server.send(400,"text/plain; charset=utf-8","方向設定無效");return;}
+    uint8_t requested=value.toInt(),requestedBrightness=brightnessValue.toInt();uint16_t requestedTimeout=timeoutValue.toInt();
     if(String(requestedTimeout)!=timeoutValue||!screenpolicy::validTimeout(requestedTimeout)){server.send(400,"text/plain; charset=utf-8","關屏時間設定無效");return;}
-    if(!saveDisplaySettings(requested,requestedTimeout)){server.send(500,"text/plain; charset=utf-8","儲存失敗，螢幕設定尚未變更");return;}
-    displayRotation=requested;screenTimeoutMinutes=requestedTimeout;screen.setRotation(displayRotation);wakeScreen();forceDraw=true;
+    if(String(requestedBrightness)!=brightnessValue||!screenpolicy::validBrightness(requestedBrightness)){server.send(400,"text/plain; charset=utf-8","亮度設定無效");return;}
+    if(!saveDisplaySettings(requested,requestedTimeout,requestedBrightness)){server.send(500,"text/plain; charset=utf-8","儲存失敗，螢幕設定尚未變更");return;}
+    displayRotation=requested;screenTimeoutMinutes=requestedTimeout;screenBrightness=requestedBrightness;screen.setRotation(displayRotation);setBacklight(true);wakeScreen();forceDraw=true;
     server.sendHeader("Location","/display");server.send(303,"text/plain","");
   });
   server.on("/wifi/reset",HTTP_POST,[]{
@@ -473,10 +503,13 @@ void routes() {
   server.onNotFound([]{if(portal){server.sendHeader("Location","http://192.168.4.1/");server.send(302,"text/plain","");}else server.send(404,"text/plain; charset=utf-8","找不到此頁面");}); server.begin();deviceRoutesReady=true;
 }
 void pollBackend() {
-  if(localSchedule){syncState="班表已儲存";return;}
   if(!WiFi.isConnected()||backend.isEmpty()||token.isEmpty())return;
-  HTTPClient h; h.setConnectTimeout(1500);h.setTimeout(2000);h.begin(backend+"/api/device/schedule");h.addHeader("Authorization",String("Bearer ")+token);
-  int code=h.GET(); if(code==200){String err,body;if(!boundedHttpBody(h,MAX_JSON,body,8000))syncState="班表大小無效或傳輸不完整";else if(applySchedule(body,true,err))syncState="班表已同步";else syncState=err;}else syncState=String("同步失敗，回應碼 ")+code;h.end();
+  HTTPClient h;h.setConnectTimeout(1500);h.setTimeout(2000);
+  if(localSchedule)syncState="班表已儲存";
+  else {
+    h.begin(backend+"/api/device/schedule");h.addHeader("Authorization",String("Bearer ")+token);
+    int code=h.GET(); if(code==200){String err,body;if(!boundedHttpBody(h,MAX_JSON,body,8000))syncState="班表大小無效或傳輸不完整";else if(applySchedule(body,true,err))syncState="班表已同步";else syncState=err;}else syncState=String("同步失敗，回應碼 ")+code;h.end();
+  }
   JsonDocument d;d["revision"]=revision;d["status"]=ringing?"ringing":(clockValid()?"ready":"waiting_for_time");d["ip"]=WiFi.localIP().toString();
   int64_t next=INT64_MAX;for(auto &a:alarms)if(alarmclock::upcoming(a.epoch,time(nullptr),handled)&&a.epoch<next)next=a.epoch;
   if(next!=INT64_MAX)d["next_alarm"]=next;
@@ -504,7 +537,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(BUTTON_STOP),stopPressed,FALLING);attachInterrupt(digitalPinToInterrupt(BUTTON_SNOOZE),snoozePressed,FALLING);attachInterrupt(digitalPinToInterrupt(BUTTON_TEST),plusPressed,FALLING);
 #if CUBE_TFT
   frame=new GFXcanvas16(240,240);assert(frame && frame->getBuffer());
-  SPI.begin(9,-1,10,14);screen.init(240,240);loadDisplaySettings();screen.setRotation(displayRotation);screen.invertDisplay(true);pinMode(13,OUTPUT);digitalWrite(13,HIGH);screenAwake=true;screenLastActivity=millis();
+  SPI.begin(9,-1,10,14);screen.init(240,240);loadDisplaySettings();screen.setRotation(displayRotation);screen.invertDisplay(true);backlightPwm=ledcAttach(13,5000,8);if(!backlightPwm)pinMode(13,OUTPUT);setBacklight(true);screenAwake=true;screenLastActivity=millis();
 #else
   Wire.begin(41,42);screen.begin(SSD1306_SWITCHCAPVCC,0x3c);screen.setRotation(2);
 #endif

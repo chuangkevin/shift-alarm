@@ -5,13 +5,13 @@
 ## 現況基準
 
 - GitHub：`git@github.com:chuangkevin/shift-alarm.git`，預設分支 `main`。
-- 實機韌體：0.3.2，已由 0.3.1 經原生 Tailscale OTA 完整驗收。
-- 後端：0.1.0，部署於 `rpi-matrix:/home/kevin/DockerCompose/shift-alarm`。
+- 實機韌體：0.3.6。已用 USB 僅寫入非執行中的 app0 與單一 OTA 選擇 sector；重開後 Wi-Fi、Tailscale、90°、15 分鐘關屏、25% 亮度、班表與鬧鐘均保留。
+- 後端：0.1.2，部署於 `rpi-matrix:/home/kevin/DockerCompose/shift-alarm`，只提供辨識、心跳與私有韌體。Gemini `max_tokens` 預設 6000、強制下限 400。
 - 目前韌體原始碼：`firmware-next/`，ESP-IDF 5.3.2 / Arduino 3.1.3。
 - `firmware/` 是歷史版本，只供追查，不是更新來源。
 - 裝置後端固定為 Tailscale 位址 `100.126.226.79:8237`。裝置自己的 Tailscale IP 可能因重新授權而改變，部署前必須讀取當下狀態，不可只抄舊紀錄。
 
-0.3.2 的已驗收功能包括：首次 QR 配網、換 Wi-Fi、port 80 統一介面、本機月曆與時／分選擇器、圖片辨識草稿、每三小時校時與手動校時、四方向旋轉、持久關屏時間與永久開啟、BOOT 關屏、任一鍵喚醒／停鈴、鬧鐘強制亮屏及 Tailscale OTA。詳細證據在 `README.md`、`docs/更新部署.md` 與 `docs/Tailscale-OTA.md`。
+0.3.6 的已驗收功能包括：首次 QR 配網、換 Wi-Fi、port 80 本機月曆與時／分選擇器、圖片辨識草稿、每三小時校時與手動校時、四方向旋轉、持久關屏時間／亮度與永久開啟、任一鍵喚醒／停鈴、鬧鐘強制亮屏、跨月「連續上班只通知第一天」、後續日期外框、每筆時間獨立開關及持續心跳。OTA 最多三次 Range 續傳已通過 host 測試，尚待下一次實機 OTA 驗收。
 
 ## 接手後立即執行
 
@@ -59,6 +59,8 @@ idf.py -C firmware-next size
 ```
 
 手機不必加入 Tailnet。ESP32 必須自行加入 Tailnet，才能使用 AI 圖片辨識與 OTA。手動月曆及鬧鐘直接保存在裝置，即使 Tailscale 未連線也可操作與響鈴。
+
+`https://alarm.sisihome.org` 由 GN100 Caddy 直接代理 ESP32 的 Tailscale port 80，根路徑轉 `/calendar`；裝置區網 IP 也開同一個 `/calendar`。兩者必須保持為同一份 ESP32 頁面，不能再把 rpi-matrix 後端首頁當成第二套管理介面。
 
 ## 私密檔案邊界
 

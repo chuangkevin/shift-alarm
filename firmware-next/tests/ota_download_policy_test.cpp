@@ -15,4 +15,7 @@ int main() {
     assert(deadline(start+29999,start,start)==Deadline::none);
     assert(deadline(start+30000,start,start)==Deadline::idle);
     assert(deadline(start+600000,start,start+600000)==Deadline::total);
+    assert(mayReconnect(0));
+    assert(mayReconnect(2));
+    assert(!mayReconnect(3));
 }
