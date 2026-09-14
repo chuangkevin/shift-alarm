@@ -27,3 +27,4 @@
 - 0.3.8 從後端 0.1.3 下載 1,617,664-byte 映像的兩次明確單次嘗試，分別在 1,309,111 與 356,671 bytes 停止，裝置回報舊版合併的 `n<=0 || alarm_ota_write` 錯誤；裝置保持健康。停止位置不固定，不能只憑這兩次結果證明單一根因。
 - 後端 0.1.4 只對 authenticated firmware binary endpoint 改用 4096-byte chunks，chunk 之間等待 5 ms；1,617,664 bytes 約 395 個 chunks，單是 pacing 約增加 2 秒，連同傳輸與 flash 寫入以約 8 秒完成為目標，仍遠低於舊版 600 秒總期限。這是降低原生 Tailnet/TCP burst pressure、協助 0.3.8 bootstrap 的 mitigation；live retry 前不宣稱已修復。
 - 2026-09-15 部署 paced stream 後的第三次 0.3.8 POST 在下載狀態重置前即 `RemoteDisconnected`；裝置仍回報前次 356,671-byte 失敗狀態。這次沒有開始寫入，paced stream 未能完成 bootstrap；不得再重送，改用 USB 資料線安裝 0.3.10。
+- 第四次改由 GN100 送出控制請求，裝置在 760,496 bytes 停止；5 ms chunk 間隔會增加 0.3.8 在 `available()>0` 後 `read()==0` 的競態空窗。後端 0.1.5 保留 4 KiB chunk，但不再主動插入間隔；live 驗證前不宣稱已修復。

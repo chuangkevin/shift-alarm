@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError, model_validator
 
-VERSION = '0.1.4'
+VERSION = '0.1.5'
 TZ = ZoneInfo('Asia/Taipei')
 DATA = Path(os.environ.get('ALARM_DATA', './data'))
 DATA.mkdir(parents=True, exist_ok=True)
@@ -287,7 +287,6 @@ def device_schedule():
 
 FIRMWARE_BOARD = 'xingzhi-cube-1.54tft-wifi'
 FIRMWARE_CHUNK_SIZE = 4096
-FIRMWARE_CHUNK_DELAY_SECONDS = 0.005
 
 
 def close_firmware_descriptor(descriptor):
@@ -439,16 +438,12 @@ async def firmware_chunks(descriptor: FirmwareDescriptor, start: int, length: in
     try:
         await anyio.to_thread.run_sync(descriptor.seek, start)
         remaining = length
-        first = True
         while remaining:
             chunk = await anyio.to_thread.run_sync(
                 descriptor.read, min(FIRMWARE_CHUNK_SIZE, remaining)
             )
             if not chunk:
                 return
-            if not first:
-                await asyncio.sleep(FIRMWARE_CHUNK_DELAY_SECONDS)
-            first = False
             remaining -= len(chunk)
             yield chunk
     finally:

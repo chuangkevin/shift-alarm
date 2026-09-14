@@ -143,21 +143,20 @@ def test_firmware_stream_keeps_validated_descriptor_after_path_swap(release, tmp
     assert response.content != replacement
 
 
-def test_firmware_stream_uses_configured_chunks_and_paces_only_between_chunks(release, monkeypatch):
+def test_firmware_stream_uses_continuous_configured_chunks(release, monkeypatch):
     d, m = release
-    sleeps = []
     read_threads = []
     loop_thread = threading.get_ident()
     original_read = app.read_firmware_descriptor
-
-    async def record_sleep(delay):
-        sleeps.append(delay)
 
     def record_read(descriptor, size):
         read_threads.append(threading.get_ident())
         return original_read(descriptor, size)
 
-    monkeypatch.setattr(app.asyncio, 'sleep', record_sleep)
+    async def reject_sleep(_delay):
+        pytest.fail('firmware stream must not insert an application-level delay')
+
+    monkeypatch.setattr(app.asyncio, 'sleep', reject_sleep)
     monkeypatch.setattr(app, 'read_firmware_descriptor', record_read)
     raw_descriptor = os.open(d / (m['sha256'] + '.bin'), os.O_RDONLY)
     descriptor = app.FirmwareDescriptor(raw_descriptor)
@@ -168,9 +167,8 @@ def test_firmware_stream_uses_configured_chunks_and_paces_only_between_chunks(re
     chunks = asyncio.run(consume())
     assert [len(chunk) for chunk in chunks] == [4096, 4096, 1808]
     assert b''.join(chunks) == (d / (m['sha256'] + '.bin')).read_bytes()
-    assert sleeps == [app.FIRMWARE_CHUNK_DELAY_SECONDS] * (len(chunks) - 1)
     assert app.FIRMWARE_CHUNK_SIZE == 4096
-    assert app.FIRMWARE_CHUNK_DELAY_SECONDS == 0.005
+    assert not hasattr(app, 'FIRMWARE_CHUNK_DELAY_SECONDS')
     assert read_threads and all(thread != loop_thread for thread in read_threads)
     with pytest.raises(OSError):
         os.fstat(raw_descriptor)

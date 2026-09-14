@@ -2,7 +2,7 @@ name: shift-alarm
 services:
   shift-alarm:
     build: ..
-    image: shift-alarm:0.1.4
+    image: shift-alarm:0.1.5
     container_name: shift-alarm
     restart: unless-stopped
     env_file: ../.env
