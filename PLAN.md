@@ -33,5 +33,5 @@ AI 接手規則見 `AGENTS.md`，完整現況見 `docs/AI接手開發.md`。以�
 - Tailscale 裝置 IP 可能在重新授權後改變；每次部署都要從即時狀態取得。
 - 0.3.3 下載曾在 666,392 / 1,569,792 位元組停滯後安全中止。0.3.8 以 USB 僅寫入非執行中 app0 與單一 OTA 選擇 sector，未改 NVS、bootloader 或分區表；Range 續傳仍須在下一次實機 OTA 驗收。
 - 0.3.8 對 1,617,664-byte 映像的兩次明確單次下載，分別在 1,309,111 與 356,671 bytes 停止；後端 0.1.4 paced stream 部署後，第三次 POST 在開始前被斷線，裝置狀態未重置。三次均未完成，裝置保持 0.3.8 與原設定；停止 OTA 重送，改走 USB bootstrap。
-- 第四次由 GN100 送出控制請求後，0.3.8 在 760,496 bytes 停止；5 ms chunk 間隔增加舊版 `available()`／`read()` 競態空窗。後端 0.1.5 改為 4 KiB 連續串流，等待最後一次 live 驗證。
+- 第四次由 GN100 送出控制請求後，0.3.8 在 760,496 bytes 停止；後端 0.1.5 改為 4 KiB 連續串流後，第五次仍在 358,736 bytes 停止。server 端三種 chunk 策略均重現裝置端 `read()==0` 即中止；停止 OTA 重送，唯一下一步是 Mac USB 資料線 bootstrap 0.3.10。
 - 0.3.10 的 GPIO38 gate、staged flash、離線安裝、實體 TFT 排版、真實 Range reconnect 與 live OTA 尚未在硬體／實際網路驗證。原始碼或 host 測試通過不代表已部署。
