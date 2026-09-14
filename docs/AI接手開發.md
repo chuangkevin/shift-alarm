@@ -7,7 +7,7 @@
 - GitHub：`git@github.com:chuangkevin/shift-alarm.git`，預設分支 `main`。
 - 實機韌體：0.3.8。已用 USB 僅寫入非執行中的 app0 與單一 OTA 選擇 sector；重開後 Wi-Fi、Tailscale、方向、關屏、亮度、班表與鬧鐘均保留；目前為 90°、5 分鐘關屏、25% 亮度。
 - 後端：0.1.3，部署於 `rpi-matrix:/home/kevin/DockerCompose/shift-alarm`，只提供辨識、心跳與私有韌體。Gemini `max_tokens` 預設 6000、強制下限 400。
-- 待驗證原始碼：韌體 0.3.10、後端／映像 0.1.4，尚未部署。包含兩階段 staged OTA、GPIO38 fail-closed 充電 gate、離線安裝、更新資訊頁與既有 0.3.9 裝置可靠性功能。
+- 後端／映像 0.1.4 與 GN100 Caddy 離線 fallback 已於 2026-09-15 部署。待驗證韌體為 0.3.10，實機仍是 0.3.8；三次 Tailscale OTA bootstrap 未完成，下一步是以 Mac USB 資料線安裝 0.3.10。
 - 目前韌體原始碼：`firmware-next/`，ESP-IDF 5.3.2 / Arduino 3.1.3。
 - `firmware/` 是歷史版本，只供追查，不是更新來源。
 - 裝置後端固定為 Tailscale 位址 `100.126.226.79:8237`。裝置自己的 Tailscale IP 可能因重新授權而改變，部署前必須讀取當下狀態，不可只抄舊紀錄。
