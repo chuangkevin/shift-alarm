@@ -1,4 +1,4 @@
-"""Tailscale-only OTA preflight/start. Never writes flash or publishes releases."""
+"""Tailscale OTA read-only preflight, download, install, or discard. Mutations are never retried."""
 import argparse
 import hashlib
 import hmac
@@ -65,31 +65,51 @@ def verify_manifest(reply, token, expected, current):
     return m
 
 
-def preflight(client, device, backend, token, expected):
+def device_preflight(client, device):
     page = client.request(device + '/update')
     match = re.search(r"const nonce='([0-9a-f]{32})'", page)
     if not match:
         raise ValueError('Update page nonce unavailable')
     headers = {'X-Setup-Nonce': match[1]}
+    status = client.get(device + '/api/status')
+    update = client.get(device + '/api/update', headers)
+    required = ('currentVersion', 'phase', 'busy', 'markerFault', 'canDownload', 'downloadReason',
+                'canInstall', 'installReason', 'session', 'sequence')
+    if any(key not in update for key in required) or update['currentVersion'] != status.get('version'):
+        raise ValueError('Firmware does not provide the two-phase OTA contract')
+    return headers, status, update
+
+
+def preflight(client, device, backend=None, token=None, expected=None, action='download'):
+    headers, status, update = device_preflight(client, device)
+    if action == 'install':
+        if update.get('canInstall') is not True:
+            raise ValueError('OTA install blocked: ' + str(update.get('installReason', 'unknown')))
+        staged = update.get('staged')
+        if expected and (not isinstance(staged, dict) or staged.get('version') != expected):
+            raise ValueError('Staged version mismatch')
+        return headers, status, update
+    if action == 'discard':
+        if not isinstance(update.get('staged'), dict) and update.get('markerFault') is not True:
+            raise ValueError('OTA discard blocked: no-staged-update')
+        return headers, status, update
+    if action is None:
+        return headers, status, update
+    if update.get('canDownload') is not True:
+        raise ValueError('OTA download blocked: ' + str(update.get('downloadReason', 'unknown')))
+    if not backend or token is None or not expected:
+        raise ValueError('Download preflight requires backend, token and version')
     native = client.get(device + '/api/tailnet', headers)
     if native.get('connected') is not True or native.get('acl_ready') is not True or 'http://' + native.get('ip', '') != device:
         raise ValueError('Native Tailscale identity/readiness mismatch')
-    status = client.get(device + '/api/status')
     from urllib.parse import urlsplit
     if status.get('backendTransport') != 'tailscale' or status.get('backendHost') != urlsplit(backend).hostname:
         raise ValueError('Firmware does not attest a fixed native Tailscale backend')
     if client.get(device + '/api/health').get('ok') is not True:
         raise ValueError('Backend health probe failed')
-    update = client.get(device + '/api/update', headers)
-    if update.get('canStart') is not True:
-        reason = update.get('reason') if isinstance(update.get('reason'), str) else 'unknown'
-        raise ValueError('OTA preflight blocked: ' + reason)
-    if status.get('clockReady') is not True or status.get('ringing') is not False:
-        raise ValueError('Clock or alarm guard not ready')
     manifest = verify_manifest(client.get(backend + '/api/device/update',
                                {'Authorization': 'Bearer ' + token}), token, expected, status['version'])
     return headers, status, manifest
-
 
 
 def verify_after(after, before, native, device, backend):
@@ -100,15 +120,9 @@ def verify_after(after, before, native, device, backend):
     for key in ('rotation', 'localSchedule'):
         if after.get(key) != before.get(key):
             raise ValueError('Saved setting changed')
-    if ('screenTimeoutMinutes' in before
-            and after.get('screenTimeoutMinutes') != before['screenTimeoutMinutes']):
-        raise ValueError('Saved screen timeout changed')
-    if ('screenBrightness' in before
-            and after.get('screenBrightness') != before['screenBrightness']):
-        raise ValueError('Saved screen brightness changed')
-    if ('firstConsecutiveOnly' in before
-            and after.get('firstConsecutiveOnly') != before['firstConsecutiveOnly']):
-        raise ValueError('Saved consecutive-workday setting changed')
+    for key in ('screenTimeoutMinutes', 'screenBrightness', 'firstConsecutiveOnly'):
+        if key in before and after.get(key) != before[key]:
+            raise ValueError('Saved setting changed')
     if before.get('localSchedule') is True:
         for key in ('revision', 'alarmCount'):
             if key not in before or after.get(key) != before[key]:
@@ -124,63 +138,89 @@ def wait_seconds(value):
     return seconds
 
 
-def main():
+def make_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--device', required=True, type=tailnet_url)
-    parser.add_argument('--backend', required=True, type=tailnet_url)
-    parser.add_argument('--token-file', required=True, type=Path)
-    parser.add_argument('--version', required=True)
+    parser.add_argument('--backend', type=tailnet_url)
+    parser.add_argument('--token-file', type=Path)
+    parser.add_argument('--version')
     parser.add_argument('--wait-seconds', type=wait_seconds, default=900)
-    parser.add_argument('--start', action='store_true')
-    parser.add_argument('--power-confirmed', action='store_true')
-    args = parser.parse_args()
-    if args.start and not args.power_confirmed:
-        parser.error('--start requires explicit --power-confirmed')
-    if args.token_file.stat().st_mode & 0o077:
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--download', action='store_true')
+    mode.add_argument('--install', action='store_true')
+    mode.add_argument('--discard', action='store_true')
+    parser.set_defaults(read_only=True)
+    return parser
+
+
+def read_token(parser, path):
+    if path is None:
+        parser.error('--download requires --token-file')
+    if path.stat().st_mode & 0o077:
         parser.error('Token file must be private (chmod 600)')
-    token = args.token_file.read_text().strip()
+    token = path.read_text().strip()
     if not token or '\n' in token or '\r' in token:
         parser.error('Invalid token file')
+    return token
+
+
+def main():
+    parser = make_parser()
+    args = parser.parse_args()
+    action = 'download' if args.download else 'install' if args.install else 'discard' if args.discard else None
+    token = None
+    if action == 'download':
+        if not args.backend or not args.version:
+            parser.error('--download requires --backend and --version')
+        token = read_token(parser, args.token_file)
+    if action == 'install' and not args.version:
+        parser.error('--install requires --version')
     client = Client()
-    headers, before, manifest = preflight(client, args.device, args.backend, token, args.version)
-    print('Preflight passed; release', manifest['version'], manifest['sha256'])
-    if not args.start:
+    headers, before, detail = preflight(client, args.device, args.backend, token, args.version, action)
+    if action is None:
+        print('Read-only preflight:', detail['phase'], 'download=' + detail['downloadReason'],
+              'install=' + detail['installReason'])
         return
-    headers['Content-Type'] = 'application/x-www-form-urlencoded'
-    # Never retry this mutation: an ambiguous response requires read-only inspection.
-    client.request(args.device + '/api/update/start', headers, b'power_confirmed=1')
+    path = '/api/update/' + action
+    client.request(args.device + path, headers, b'')  # exactly one mutation POST
+    print('Accepted', action, 'request; no mutation retry')
+    if action == 'discard':
+        return
     deadline = time.monotonic() + args.wait_seconds
     while time.monotonic() < deadline:
         time.sleep(5)
         try:
-            after = client.get(args.device + '/api/status')
+            _, after, update = device_preflight(client, args.device)
+            if action == 'download':
+                staged = update.get('staged')
+                if isinstance(staged, dict) and staged.get('version') == args.version and update.get('busy') is False:
+                    print('Staged version verified by device:', args.version)
+                    return
+                if update.get('busy') is False and update.get('phase') == 'error':
+                    raise ValueError('Device ended download; inspect read-only update status')
+                if type(update.get('received')) is int and type(update.get('total')) is int:
+                    print('Download bytes:', update['received'], '/', update['total'])
+                continue
             if after.get('version') != args.version:
-                progress = client.get(args.device + '/api/update', headers)
-                if progress.get('busy') is False:
-                    raise ValueError('Device ended update without target version; inspect /update')
-                if type(progress.get('received')) is int and type(progress.get('total')) is int:
-                    print('Download bytes:', progress['received'], '/', progress['total'])
                 continue
-            page = client.request(args.device + '/update')
-            nonce = re.search(r"const nonce='([0-9a-f]{32})'", page)
-            if not nonce:
-                continue
-            native = client.get(args.device + '/api/tailnet', {'X-Setup-Nonce': nonce[1]})
-            if not verify_after(after, before, native, args.device, args.backend):
-                continue
-            if client.get(args.device + '/api/health').get('ok') is not True:
-                continue
-            print('Updated version reachable over native Tailscale; rotation/mode and local schedule metadata checks passed')
+            if args.backend:
+                page = client.request(args.device + '/update')
+                nonce = re.search(r"const nonce='([0-9a-f]{32})'", page)
+                if not nonce:
+                    continue
+                native = client.get(args.device + '/api/tailnet', {'X-Setup-Nonce': nonce[1]})
+                if not verify_after(after, before, native, args.device, args.backend):
+                    continue
+            print('Installed version reachable; saved-setting checks passed where requested')
             return
         except (OSError, json.JSONDecodeError):
             continue
-    raise ValueError('Update not verified within configured wait; do not automatically retry or flash')
+    raise ValueError('Operation not verified within configured wait; do not automatically retry or flash')
 
 
 if __name__ == '__main__':
     try:
         main()
     except Exception as exc:
-        # Never echo network bodies, URLs with credentials, nonce or token.
         print('OTA stopped:', type(exc).__name__, '(inspect private diagnostics; no automatic retry)')
         raise SystemExit(1)

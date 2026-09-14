@@ -1,55 +1,72 @@
 # 經原生 Tailscale 更新
 
-後續應用程式更新只經 Tailscale。`deploy/ota_tailnet.py` 不呼叫 esptool、不寫 USB、不發布映像、不改引導程式或分區表，也不擦除 NVS。首次安裝仍依 `更新部署.md` 的獨立 bootstrap 流程；裝置無法啟動或沒有雙 OTA 分區時，此工具無法修復。
+後續應用程式更新只經裝置原生 Tailscale。`deploy/ota_tailnet.py` 不發布映像、不使用 USB、不改 bootloader／partition table／NVS 分區，也不自動串接下載與安裝。
 
-## 前置條件
+## 供電 gate
 
-- 裝置與操作電腦均已加入 Tailnet；ACL 允許電腦到裝置 TCP 80、裝置到後端 TCP 8237。
-- 已安裝的韌體須固定使用原生 Tailscale 後端，`/api/status` 回報 `backendTransport: "tailscale"` 與 `backendHost: "100.126.226.79"`。缺少此資訊的舊版會遭工具拒絕，不能以 LAN 通道代替。這是現存版本的 bootstrap 限制，不能只靠待安裝版本新增此欄位。
-- 已完成新版審查、測試與應用程式建置；版本必須遞增。使用 `deploy/publish_firmware.py` 在後端私有 `data/releases` 目錄發布應用程式映像，詳見 `更新部署.md`。發布和安裝是兩個獨立動作。
-- `DEVICE_TOKEN` 放在私有檔案（權限 `0600`），不放命令列、Git 或公開附件。帶 token 的編譯映像亦不可公開。
-- 穩定供電、時鐘與排程已恢復，未響鈴、未貪睡，五分鐘內無鬧鐘。工具檢查可見狀態，韌體在寫入與啟動前仍會再次檢查完整 guard。
+下載及安裝都要求 GPIO38 當下取樣有效且 active-high `charging=true`。沒有人工確認、checkbox 或 CLI override。
 
-## 操作
+這是刻意 fail-closed 的充電狀態，不是可靠的 USB／VBUS 偵測。電池充滿時可能停止回報充電，因此即使 USB 仍接著，裝置也可能回覆 `charging-required`。先保留已下載更新，等裝置再次顯示充電再安裝。
 
-先執行唯讀預檢。以下位址與版本請依實際裝置及已審查發布版本填寫：
+## 兩階段流程
+
+1. 唯讀預檢只讀取 `/update`、`/api/status` 與 `/api/update`：
+
+```sh
+python3 deploy/ota_tailnet.py --device http://裝置-Tailscale-IP
+```
+
+2. 下載前另驗證裝置原生 Tailnet、固定後端、後端健康狀態及 signed manifest。只送一次 `/api/update/download`：
 
 ```sh
 python3 deploy/ota_tailnet.py \
-  --device http://100.90.212.116 \
+  --device http://裝置-Tailscale-IP \
   --backend http://100.126.226.79:8237 \
-  --token-file /私有目錄/device-token.txt \
-  --version 0.2.8
+  --token-file /私有路徑/device-token.txt \
+  --version 0.3.10 --download --wait-seconds 900
 ```
 
-預檢會透過裝置 Tailnet IP 取得本機頁與 nonce、確認原生 Tailnet 身分和 ACL、檢查固定後端及透過裝置代理取得 `/api/health`，再依 `/api/update` 的 `canStart`／`reason` 檢查貪睡、排程、時鐘、響鈴、五分鐘內鬧鐘、Wi-Fi、Tailnet 與後端可達性，最後從後端驗證預期版本的 HMAC 清單。它不使用 DNS、LAN fallback、環境 HTTP proxy 或 HTTP redirect。後端清單由現有 DEVICE_TOKEN 按 `board\nversion\nsize\nsha256\n` 簽署；token 與 nonce 不會輸出。
+下載完成後不會重開。完整大小、stream SHA-256、`esp_ota_end` 與 image descriptor 通過後，裝置把小型 authenticated marker 寫入既有 `alarm_nvs`。映像留在 inactive OTA slot，不把 binary 放進 NVS。
 
-確認已接穩定電源後，同一命令加上 `--start --power-confirmed`，才會送出一次安裝請求。電源旗標是操作者確認，不是電壓量測。命令不重試安裝 POST，即使回應遺失也不重送。
+3. 安裝只讀本地 staged image，不連後端。只送一次 `/api/update/install`：
 
-工具預設最多等 900 秒（可用 `--wait-seconds 60..1800` 調整），透過同一 Tailnet IP 驗證目標版本、方向、關屏時間、班表模式、本地班表的 revision／鬧鐘數、原生連線身分和固定 Tailscale 後端資料通道。舊版尚未提供關屏欄位時會從下一次更新開始納入。逾時表示尚未完成驗收，不能解讀為映像必定失敗；先唯讀檢查裝置與 OTA 狀態。工具不自動改回 LAN、刷機或重新授權。
+```sh
+python3 deploy/ota_tailnet.py \
+  --device http://裝置-Tailscale-IP \
+  --version 0.3.10 --install --wait-seconds 900
+```
 
-## 保存與驗收範圍
+安裝會重新驗 manifest/marker HMAC，從 partition table 推導 inactive slot，確認 marker target 相符且不是 running slot，從 flash 重讀完整映像計算 SHA-256，重讀 board/version descriptor，並在驗證期間及 boot selection 前重查充電、時鐘、排程與鬧鐘 guard。清除 marker 成功後才選擇 boot partition。若 boot selection 失敗，裝置留在目前版本並要求重新下載。
 
-OTA 元件只將映像寫到備用 app partition，驗證後切換啟動；NVS、Wi-Fi、Tailnet 身分、方向、關屏時間與排程不在寫入範圍。新韌體仍可能有資料遷移錯誤，因此版本可達不等於所有功能已驗收：另檢查班表內容、時鐘、螢幕、喇叭與按鈕。工具不會因正常後端同步使 revision 改變就報錯，也不會為測試而新增響鈴。
+4. 不要安裝時可只清 marker；這不擦除 app partition：
 
-2026-09-13 已從 0.3.1 經裝置原生 Tailscale 完整安裝 0.3.2：預檢、1,564,240 位元組下載、SHA-256／HMAC 驗證、備用分區啟動、Tailnet 回連及保存班表驗收均通過。另在實機設定 1 分鐘關屏，確認關屏後時鐘與 11 筆鬧鐘仍保留；測試鬧鐘會喚醒螢幕並響鈴，停止後排程未改動，最後恢復永久開啟。
+```sh
+python3 deploy/ota_tailnet.py --device http://裝置-Tailscale-IP --discard
+```
 
-回退依賴 bootstrap 安裝的回退引導程式、雙 OTA 分區與有效舊映像。開機自測確認硬體初始化、NVS 排程恢復與本機服務；它不保證外部 Tailscale 服務當時可達。命令完成後的資料通道檢查補上此項驗收，但不是硬體測試報告。
+三個 mutation mode 互斥。工具不會重試 mutation POST，也不會把 `--download` 自動接成 `--install`。回應遺失時先執行唯讀預檢。
 
-## 開發驗證
+## 中斷與重開
+
+- 同一次開機的 HTTP stream 中斷，最多三輪 Range reconnect，每輪 handshake 有界重試。
+- 未完成映像沒有 marker；重開後從 byte 0 重新下載。
+- 完整 staged image 與 marker 跨正常重開保存，可在 Wi-Fi、Tailnet及後端不可用時從裝置本地 `/update` 安裝。
+- target 已成為 running partition、schema 不相容、marker 損毀、HMAC 錯誤、board/version/target 不符時，不會提供安裝；唯讀檢查只顯示 `marker-fault`，不會清除或改寫 NVS。必須明確執行 discard，再確認 marker 不存在。
+- marker load/store/readback/clear 只要無法確認結果，狀態就是 `marker-fault`，下載與安裝都封鎖。唯讀 `/api/update` 只會再次 load，不呼叫 marker clear/store，也不改 flash；讀到完整 authenticated record 或明確不存在時可無寫入恢復。`刪除已下載更新` 是唯一清理 corrupt/incompatible marker 的操作，但只有 clear 後 load 明確回覆不存在才恢復 idle。
+- OTA boot rollback self-test 不依賴 Internet，行為不變。
+
+## 狀態契約
+
+`GET /api/update` 回傳 current version、staged metadata、phase、busy、`markerFault`、`canDownload`／`downloadReason`、`canInstall`／`installReason`、received/total、Range reconnect 診斷、boot session 與 sequence。`marker-fault` 是穩定 reason。成功 discard、boot-set failure 或其他 confirmed no-staged terminal state會清除 received/total/progress；後端 manifest latest version另行保存。狀態不含 token、nonce、credential URL 或 private Tailnet raw state。
+
+`/update` 以 nonce 保護三個 POST；唯讀狀態可跨 reboot/session 讀取。瀏覽器用 boot session、sequence 與 request ordering 拒絕 stale response，mutation 不自動重送。
+
+## 驗證狀態
 
 ```sh
 python3 -m unittest discover -s deploy/tests -v
 sh firmware-next/components/alarm_ota/tests/run_host_tests.sh
+python3 firmware-next/components/alarm_ota/tests/test_manifest_contract.py
 ```
 
-工具測試以假的 API 回應驗證拒絕規則、HMAC 與預檢唯讀性；不是實機 OTA 或真實 WireGuard/TLS 傳輸驗證。尚未執行實機更新時，不得把 host 測試或成功編譯記為 OTA 成功。
-
-0.3.9 的 `/api/update` 提供穩定 phase、reason、reconnect count、最後 HTTP 狀態、最後進度時間與 `canStart`。每次串流中斷的 Range reconnect handshake 最多嘗試三次並退避；啟動安裝的 POST 仍只送一次。真實 Range 中斷與續傳尚未在實機驗證。
-
-## 目前實機狀態（2026-09-13）
-
-實機目前為 0.3.8，這次使用 USB 寫入非執行中 app0，沒有用 OTA 宣稱續傳已完成實機驗收。0.3.4 起的最多三次 HTTP Range 續傳已有 host 測試；下一次正常升版仍須依本頁先做唯讀預檢、只送一次安裝，再以 Tailscale 驗證下載、切換、回連及方向、關屏、亮度與班表保留。
-
-
-下載最多十分鐘；三十秒沒有成功寫入的新資料就中止。OTA 元件從 begin 到 activate 的總期限同為十分鐘，包含下載前準備與驗證，因此可用下載時間略少於十分鐘。`/api/update` 的 `received`／`total` 為已成功寫入與預期的位元組數，介面顯示百分比，錯誤區分總期限、停滯、連線與寫入／安全檢查。工具在舊版仍運行且更新已停止時提早結束，不重試 POST。此修正不推定先前未具進度資訊的失敗一定由超時造成。
+目前只有 code、host tests 與 credential-free build 證據。GPIO38 真實行為、240×240 實體畫面、real-flash staged image、跨重開保存、離線安裝及 live OTA，均須等裝置在線且供電後實測；不得把 host 結果記成硬體驗收。

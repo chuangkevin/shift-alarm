@@ -25,6 +25,8 @@ static struct {
     alarm_ota_state_t state;
     alarm_ota_handle_t generation;
     alarm_ota_manifest_t manifest;
+    alarm_ota_staged_record_t staged;
+    bool staged_valid;
     const esp_partition_t *target;
     esp_ota_handle_t writer;
     bool writer_open;
@@ -56,11 +58,20 @@ static esp_err_t lock(void) {
 static void unlock(void) { xSemaphoreGive(g.mutex); }
 static bool authorized(const void *request) { return g.config.authorize(request, g.config.user_context); }
 
-static void discard(void) {
+static void discard_transfer(void) {
     if (g.writer_open) esp_ota_abort(g.writer);
     g.writer_open = false;
     mbedtls_sha256_free(&g.sha);
-    g.state = ALARM_OTA_IDLE;
+    g.state = g.staged_valid ? ALARM_OTA_STAGED : ALARM_OTA_IDLE;
+    g.received = 0;
+    g.prefix_size = 0;
+    g.target = NULL;
+}
+
+static void marker_fault(void) {
+    memset(&g.staged, 0, sizeof(g.staged));
+    g.staged_valid = false;
+    g.state = ALARM_OTA_MARKER_FAULT;
     g.received = 0;
     g.prefix_size = 0;
     g.target = NULL;
@@ -68,18 +79,19 @@ static void discard(void) {
 
 static esp_err_t safe_now(void) {
     alarm_ota_guard_t guard = {0};
-    if (g.config.read_guard(&guard, g.config.user_context) != ESP_OK ||
-        alarm_ota_check_guard(&guard, g.config.quiet_window_seconds) != ALARM_OTA_POLICY_OK)
-        return ALARM_OTA_ERR_UNSAFE;
+    if (g.config.read_guard(&guard, g.config.user_context) != ESP_OK) return ALARM_OTA_ERR_UNSAFE;
+    alarm_ota_policy_result_t result = alarm_ota_check_guard(&guard, g.config.quiet_window_seconds);
+    if (result == ALARM_OTA_POLICY_CHARGING_REQUIRED) return ALARM_OTA_ERR_CHARGING_REQUIRED;
+    if (result != ALARM_OTA_POLICY_OK) return ALARM_OTA_ERR_UNSAFE;
     return ESP_OK;
 }
 
 static esp_err_t active(alarm_ota_handle_t handle, const void *request) {
     if (!authorized(request)) return ALARM_OTA_ERR_AUTH;
     if (g.state == ALARM_OTA_IDLE || handle != g.generation) return ESP_ERR_INVALID_STATE;
-    if (esp_timer_get_time() >= g.deadline_us) { discard(); return ESP_ERR_TIMEOUT; }
+    if (esp_timer_get_time() >= g.deadline_us) { discard_transfer(); return ESP_ERR_TIMEOUT; }
     esp_err_t err = safe_now();
-    if (err != ESP_OK) discard();
+    if (err != ESP_OK) discard_transfer();
     return err;
 }
 
@@ -116,12 +128,93 @@ static bool authentic_manifest(const alarm_ota_manifest_t *manifest) {
     return alarm_ota_digest_equal(expected, actual);
 }
 
+static void encode_digest(const uint8_t digest[32], char out[ALARM_OTA_DIGEST_CAP]) {
+    static const char hex[] = "0123456789abcdef";
+    for (unsigned i = 0; i < 32; ++i) { out[i * 2] = hex[digest[i] >> 4]; out[i * 2 + 1] = hex[digest[i] & 15]; }
+    out[64] = 0;
+}
+
+static bool staged_authentic(const alarm_ota_staged_record_t *record) {
+    char canonical[ALARM_OTA_STAGED_CANONICAL_CAP]; uint8_t expected[32], actual[32];
+    size_t n = alarm_ota_staged_canonical(record, canonical, sizeof(canonical));
+    if (!n || !alarm_ota_decode_digest(record->record_hmac_sha256, expected)) return false;
+    const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    return md && mbedtls_md_hmac(md, g.token, g.config.device_token_length,
+        (const unsigned char *)canonical, n, actual) == 0 && alarm_ota_digest_equal(expected, actual);
+}
+
+static bool target_for_record(const alarm_ota_staged_record_t *record, const esp_partition_t **out) {
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
+    if (!running || !target || target->address == running->address ||
+        target->type != ESP_PARTITION_TYPE_APP ||
+        target->subtype < ESP_PARTITION_SUBTYPE_APP_OTA_MIN || target->subtype >= ESP_PARTITION_SUBTYPE_APP_OTA_MAX ||
+        target->subtype != record->target_subtype || target->address != record->target_address) return false;
+    if (out) *out = target;
+    return true;
+}
+
+static bool staged_record_valid(const alarm_ota_staged_record_t *record) {
+    const esp_app_desc_t *app = esp_app_get_description();
+    const esp_partition_t *target = NULL;
+    esp_app_desc_t desc;
+    if (!alarm_ota_staged_record_shape_valid(record) || !authentic_manifest(&record->manifest) ||
+        !staged_authentic(record) || !app || !target_for_record(record, &target) ||
+        alarm_ota_check_manifest(&record->manifest, g.board, app->version,
+            target->size, PREFIX_SIZE) != ALARM_OTA_POLICY_OK ||
+        esp_ota_get_partition_description(target, &desc) != ESP_OK) return false;
+    alarm_ota_manifest_t previous = g.manifest;
+    g.manifest = record->manifest;
+    bool valid = image_identity(&desc) == ESP_OK;
+    if (!valid) g.manifest = previous;
+    return valid;
+}
+
+static void accept_staged(const alarm_ota_staged_record_t *record) {
+    g.manifest = record->manifest;
+    g.staged = *record;
+    g.staged_valid = true;
+    g.state = ALARM_OTA_STAGED;
+    g.received = 0;
+    g.target = NULL;
+}
+
+static esp_err_t observe_marker(const alarm_ota_staged_record_t *expected) {
+    alarm_ota_staged_record_t record = {0};
+    esp_err_t err = g.config.marker_load(&record, g.config.user_context);
+    if (err == ESP_ERR_NOT_FOUND) {
+        memset(&g.staged, 0, sizeof(g.staged));
+        g.staged_valid = false;
+        g.state = ALARM_OTA_IDLE;
+        g.received = 0;
+        g.target = NULL;
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (err != ESP_OK || !staged_record_valid(&record) ||
+        (expected && memcmp(expected, &record, sizeof(record)) != 0)) {
+        marker_fault();
+        return ALARM_OTA_ERR_MARKER;
+    }
+    accept_staged(&record);
+    return ESP_OK;
+}
+
+static esp_err_t clear_and_observe(void) {
+    esp_err_t clear_err = g.config.marker_clear(g.config.user_context);
+    esp_err_t observed = observe_marker(NULL);
+    if (observed == ESP_ERR_NOT_FOUND) return ESP_OK;
+    if (observed == ESP_OK) return clear_err == ESP_OK ? ALARM_OTA_ERR_MARKER : clear_err;
+    marker_fault();
+    return clear_err == ESP_OK ? ALARM_OTA_ERR_MARKER : clear_err;
+}
+
 esp_err_t alarm_ota_init(const alarm_ota_config_t *config) {
     if (!supported_build()) return ESP_ERR_NOT_SUPPORTED;
     if (g.initialized) return ESP_ERR_INVALID_STATE;
     if (!config || !config->board_id || !config->device_token ||
         config->device_token_length < 16 || config->device_token_length > TOKEN_CAP ||
-        !config->authorize || !config->read_guard || config->quiet_window_seconds < 300 ||
+        !config->authorize || !config->read_guard || !config->marker_load || !config->marker_store ||
+        !config->marker_clear || config->quiet_window_seconds < 300 ||
         config->quiet_window_seconds > 86400 || config->transfer_timeout_seconds < 30 ||
         config->transfer_timeout_seconds > 600 ||
         strnlen(config->board_id, ALARM_OTA_NAME_CAP) >= ALARM_OTA_NAME_CAP)
@@ -148,6 +241,7 @@ esp_err_t alarm_ota_init(const alarm_ota_config_t *config) {
     memcpy(g.token, config->device_token, config->device_token_length);
     g.config.board_id = g.board;
     g.config.device_token = g.token;
+    g.state = ALARM_OTA_MARKER_FAULT;
     g.initialized = true;
     return ESP_OK;
 }
@@ -156,7 +250,8 @@ esp_err_t alarm_ota_begin(const alarm_ota_manifest_t *manifest, const void *requ
     if (!manifest || !out) return ESP_ERR_INVALID_ARG;
     esp_err_t err = lock(); if (err != ESP_OK) return err;
     if (!authorized(request)) { unlock(); return ALARM_OTA_ERR_AUTH; }
-    if (g.state != ALARM_OTA_IDLE) { unlock(); return ESP_ERR_INVALID_STATE; }
+    if (g.state == ALARM_OTA_MARKER_FAULT) { unlock(); return ALARM_OTA_ERR_MARKER; }
+    if (g.state != ALARM_OTA_IDLE || g.staged_valid) { unlock(); return ESP_ERR_INVALID_STATE; }
     const esp_partition_t *running = esp_ota_get_running_partition();
     const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
     const esp_app_desc_t *app = esp_app_get_description();
@@ -178,7 +273,7 @@ esp_err_t alarm_ota_begin(const alarm_ota_manifest_t *manifest, const void *requ
     g.writer_open = false;
     g.deadline_us = esp_timer_get_time() + (int64_t)g.config.transfer_timeout_seconds * 1000000;
     mbedtls_sha256_init(&g.sha);
-    if (mbedtls_sha256_starts(&g.sha, 0) != 0) { discard(); unlock(); return ESP_FAIL; }
+    if (mbedtls_sha256_starts(&g.sha, 0) != 0) { discard_transfer(); unlock(); return ESP_FAIL; }
     if (++g.generation == 0) ++g.generation;
     *out = g.generation;
     g.state = ALARM_OTA_RECEIVING;
@@ -192,7 +287,7 @@ esp_err_t alarm_ota_write(alarm_ota_handle_t handle, const void *request, const 
     if (err != ESP_OK) { unlock(); return err; }
     if (g.state != ALARM_OTA_RECEIVING) { unlock(); return ESP_ERR_INVALID_STATE; }
     if (!alarm_ota_chunk_fits(g.received, length, g.manifest.size)) {
-        discard(); unlock(); return ESP_ERR_INVALID_SIZE;
+        discard_transfer(); unlock(); return ESP_ERR_INVALID_SIZE;
     }
     const uint8_t *data = bytes;
     size_t offset = 0;
@@ -213,7 +308,7 @@ esp_err_t alarm_ota_write(alarm_ota_handle_t handle, const void *request, const 
     }
     if (err == ESP_OK && offset < length) err = esp_ota_write(g.writer, data + offset, length - offset);
     if (err == ESP_OK && mbedtls_sha256_update(&g.sha, data, length) != 0) err = ESP_FAIL;
-    if (err != ESP_OK) discard(); else g.received += (uint32_t)length;
+    if (err != ESP_OK) discard_transfer(); else g.received += (uint32_t)length;
     unlock(); return err;
 }
 
@@ -222,13 +317,13 @@ esp_err_t alarm_ota_finish(alarm_ota_handle_t handle, const void *request) {
     err = active(handle, request);
     if (err != ESP_OK) { unlock(); return err; }
     if (g.state != ALARM_OTA_RECEIVING || !g.writer_open || g.received != g.manifest.size) {
-        discard(); unlock(); return ESP_ERR_INVALID_SIZE;
+        discard_transfer(); unlock(); return ESP_ERR_INVALID_SIZE;
     }
     uint8_t actual[32], expected[32];
     if (mbedtls_sha256_finish(&g.sha, actual) != 0 ||
         !alarm_ota_decode_digest(g.manifest.sha256, expected) ||
         !alarm_ota_digest_equal(actual, expected)) {
-        discard(); unlock(); return ALARM_OTA_ERR_DIGEST;
+        discard_transfer(); unlock(); return ALARM_OTA_ERR_DIGEST;
     }
     err = esp_ota_end(g.writer); /* Always consumes the IDF handle, even on failure. */
     g.writer_open = false;
@@ -237,29 +332,111 @@ esp_err_t alarm_ota_finish(alarm_ota_handle_t handle, const void *request) {
         err = esp_ota_get_partition_description(g.target, &desc);
         if (err == ESP_OK) err = image_identity(&desc);
     }
-    if (err != ESP_OK) discard();
-    else { mbedtls_sha256_free(&g.sha); g.state = ALARM_OTA_VERIFIED; }
+    if (err == ESP_OK) err = safe_now();
+    if (err == ESP_OK) {
+        alarm_ota_staged_record_t record = {0}; uint8_t mac[32];
+        record.schema = ALARM_OTA_STAGED_SCHEMA; record.manifest = g.manifest;
+        record.target_subtype = g.target->subtype; record.target_address = g.target->address;
+        char canonical[ALARM_OTA_STAGED_CANONICAL_CAP];
+        size_t n = alarm_ota_staged_canonical(&record, canonical, sizeof(canonical));
+        const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+        if (!n || !md || mbedtls_md_hmac(md, g.token, g.config.device_token_length,
+            (const unsigned char *)canonical, n, mac) != 0) err = ALARM_OTA_ERR_MARKER;
+        else {
+            encode_digest(mac, record.record_hmac_sha256);
+            esp_err_t store_err = g.config.marker_store(&record, g.config.user_context);
+            esp_err_t observed = observe_marker(&record);
+            if (observed == ESP_OK) err = ESP_OK;
+            else if (observed == ESP_ERR_NOT_FOUND) {
+                if (store_err == ESP_OK) { marker_fault(); err = ALARM_OTA_ERR_MARKER; }
+                else err = store_err;
+            }
+            else err = ALARM_OTA_ERR_MARKER;
+        }
+    }
+    if (err != ESP_OK) {
+        mbedtls_sha256_free(&g.sha); g.writer_open = false; g.received = 0;
+        g.prefix_size = 0; g.target = NULL;
+        if (g.state != ALARM_OTA_IDLE && g.state != ALARM_OTA_STAGED) marker_fault();
+    }
+    else { mbedtls_sha256_free(&g.sha); g.writer_open = false; g.target = NULL; g.received = 0; g.prefix_size = 0; g.state = ALARM_OTA_STAGED; }
     unlock(); return err;
 }
 
-esp_err_t alarm_ota_activate(alarm_ota_handle_t handle, const void *request) {
+esp_err_t alarm_ota_load_staged(void) {
     esp_err_t err = lock(); if (err != ESP_OK) return err;
-    err = active(handle, request);
-    if (err != ESP_OK) { unlock(); return err; }
-    if (g.state != ALARM_OTA_VERIFIED) { unlock(); return ESP_ERR_INVALID_STATE; }
-    /* Caller serializes this operation against schedule mutations. No deferred
-     * restart API: a verified image cannot remain armed past the checked window. */
-    err = esp_ota_set_boot_partition(g.target);
-    if (err != ESP_OK) { discard(); unlock(); return err; }
-    esp_restart();
-    return ESP_FAIL; /* esp_restart is noreturn in ESP-IDF. */
+    if (g.state == ALARM_OTA_RECEIVING) { unlock(); return ESP_ERR_INVALID_STATE; }
+    alarm_ota_staged_record_t record = {0}; err = g.config.marker_load(&record, g.config.user_context);
+    if (err == ESP_ERR_NOT_FOUND) {
+        memset(&g.staged, 0, sizeof(g.staged));g.staged_valid=false;g.state=ALARM_OTA_IDLE;g.received=0;g.target=NULL;
+        unlock();return ESP_OK;
+    }
+    if (err != ESP_OK) { marker_fault(); unlock(); return ALARM_OTA_ERR_MARKER; }
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (running && running->address == record.target_address) { marker_fault(); unlock(); return ALARM_OTA_ERR_MARKER; }
+    if (staged_record_valid(&record)) { accept_staged(&record); unlock(); return ESP_OK; }
+    marker_fault();unlock();return ALARM_OTA_ERR_MARKER;
+}
+
+typedef struct { const esp_partition_t *target; esp_err_t error; alarm_ota_staged_record_t record; } activation_context_t;
+static bool activation_auth(void *p, const alarm_ota_staged_record_t *r) {(void)p;return authentic_manifest(&r->manifest)&&staged_authentic(r);}
+static bool activation_guard(void *p) {activation_context_t *c=p;c->error=safe_now();return c->error==ESP_OK;}
+static bool activation_target(void *p, const alarm_ota_staged_record_t *r) {activation_context_t *c=p;bool ok=target_for_record(r,&c->target);if(!ok)c->error=ALARM_OTA_ERR_MARKER;return ok;}
+static bool activation_image(void *p, const alarm_ota_staged_record_t *r) {
+    activation_context_t *c=p;c->error=ESP_OK;mbedtls_sha256_context sha;mbedtls_sha256_init(&sha);uint8_t actual[32],expected[32],buffer[4096];
+    bool ok=mbedtls_sha256_starts(&sha,0)==0;
+    for(uint32_t offset=0;ok&&offset<r->manifest.size;offset+=sizeof(buffer)){
+        size_t count=r->manifest.size-offset;if(count>sizeof(buffer))count=sizeof(buffer);
+        c->error=safe_now();if(c->error!=ESP_OK||esp_partition_read(c->target,offset,buffer,count)!=ESP_OK||mbedtls_sha256_update(&sha,buffer,count)!=0)ok=false;
+    }
+    if(ok)ok=mbedtls_sha256_finish(&sha,actual)==0&&alarm_ota_decode_digest(r->manifest.sha256,expected)&&alarm_ota_digest_equal(actual,expected);
+    mbedtls_sha256_free(&sha);esp_app_desc_t desc;
+    if(ok)ok=esp_ota_get_partition_description(c->target,&desc)==ESP_OK&&image_identity(&desc)==ESP_OK;
+    if (!ok && c->error == ESP_OK) c->error = ALARM_OTA_ERR_DIGEST;
+    return ok;
+}
+static bool activation_clear(void *p) {activation_context_t *c=p;c->error=clear_and_observe();return c->error==ESP_OK;}
+static bool activation_boot(void *p) {
+    activation_context_t *c=p;c->error=safe_now();
+    if(c->error!=ESP_OK){
+        esp_err_t restored=g.config.marker_store(&c->record,g.config.user_context);
+        esp_err_t observed=observe_marker(&c->record);
+        if(observed==ESP_OK)c->error=ALARM_OTA_ERR_UNSAFE;
+        else if(observed==ESP_ERR_NOT_FOUND)c->error=restored==ESP_OK?ALARM_OTA_ERR_MARKER:restored;
+        else {marker_fault();c->error=restored==ESP_OK?ALARM_OTA_ERR_MARKER:restored;}
+        return false;
+    }
+    c->error=esp_ota_set_boot_partition(c->target);return c->error==ESP_OK;
+}
+
+esp_err_t alarm_ota_activate(const void *request) {
+    esp_err_t err=lock();if(err!=ESP_OK)return err;
+    if(!authorized(request)){unlock();return ALARM_OTA_ERR_AUTH;}
+    if(g.state!=ALARM_OTA_STAGED||!g.staged_valid){unlock();return ESP_ERR_INVALID_STATE;}
+    activation_context_t context={NULL,ALARM_OTA_ERR_MARKER,g.staged};
+    const alarm_ota_activation_ops_t ops={activation_auth,activation_target,activation_image,activation_guard,activation_clear,activation_boot};
+    alarm_ota_activation_result_t result=alarm_ota_run_activation(&context.record,&ops,&context);
+    if(result!=ALARM_OTA_ACTIVATION_OK){
+        err=context.error;
+        bool guard_blocked=err==ALARM_OTA_ERR_CHARGING_REQUIRED||err==ALARM_OTA_ERR_UNSAFE;
+        if(!guard_blocked&&(result==ALARM_OTA_ACTIVATION_BAD_RECORD||result==ALARM_OTA_ACTIVATION_TARGET_INVALID||result==ALARM_OTA_ACTIVATION_IMAGE_INVALID)){marker_fault();err=ALARM_OTA_ERR_MARKER;}
+        unlock();return err;
+    }
+    unlock();esp_restart();return ESP_FAIL;
+}
+
+esp_err_t alarm_ota_discard_staged(const void *request) {
+    esp_err_t err=lock();if(err!=ESP_OK)return err;
+    if(!authorized(request)){unlock();return ALARM_OTA_ERR_AUTH;}
+    if(g.state!=ALARM_OTA_STAGED&&g.state!=ALARM_OTA_MARKER_FAULT){unlock();return ESP_ERR_NOT_FOUND;}
+    err=clear_and_observe();unlock();return err;
 }
 
 esp_err_t alarm_ota_abort(alarm_ota_handle_t handle, const void *request) {
     esp_err_t err = lock(); if (err != ESP_OK) return err;
     if (!authorized(request)) { unlock(); return ALARM_OTA_ERR_AUTH; }
-    if (g.state == ALARM_OTA_IDLE || handle != g.generation) { unlock(); return ESP_ERR_INVALID_STATE; }
-    discard(); unlock(); return ESP_OK;
+    if (g.state != ALARM_OTA_RECEIVING || handle != g.generation) { unlock(); return ESP_ERR_INVALID_STATE; }
+    discard_transfer(); unlock(); return ESP_OK;
 }
 
 esp_err_t alarm_ota_get_status(alarm_ota_status_t *out) {
@@ -267,15 +444,18 @@ esp_err_t alarm_ota_get_status(alarm_ota_status_t *out) {
     esp_err_t err = lock(); if (err != ESP_OK) return err;
     out->state = g.state;
     out->received = g.received;
-    out->expected = g.state == ALARM_OTA_IDLE ? 0 : g.manifest.size;
+    out->expected = (g.state == ALARM_OTA_RECEIVING || g.state == ALARM_OTA_STAGED) ? g.manifest.size : 0;
+    out->staged_valid = g.staged_valid;
+    out->marker_fault = g.state == ALARM_OTA_MARKER_FAULT;
+    out->staged = g.staged;
     unlock(); return ESP_OK;
 }
 
 esp_err_t alarm_ota_maintenance(void) {
     esp_err_t err = lock(); if (err != ESP_OK) return err;
-    if (g.state != ALARM_OTA_IDLE) {
+    if (g.state == ALARM_OTA_RECEIVING) {
         err = esp_timer_get_time() >= g.deadline_us ? ESP_ERR_TIMEOUT : safe_now();
-        if (err != ESP_OK) discard();
+        if (err != ESP_OK) discard_transfer();
     }
     unlock(); return err;
 }

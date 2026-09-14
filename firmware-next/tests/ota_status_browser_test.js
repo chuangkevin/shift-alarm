@@ -2,8 +2,15 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 
 const source = fs.readFileSync('firmware-next/main/main.cpp', 'utf8');
-const policy = source.match(/\/\* OTA_STATUS_POLICY_START \*\/(.*?)\/\* OTA_STATUS_POLICY_END \*\//s);
-assert.ok(policy, 'embedded OTA browser status policy is missing');
+const policies = [...source.matchAll(/\/\* OTA_STATUS_POLICY_START \*\/(.*?)\/\* OTA_STATUS_POLICY_END \*\//gs)];
+const policy = policies.at(-1);
+assert.ok(policy, 'embedded staged OTA browser status policy is missing');
+assert.match(source, /mutationPending/);
+assert.match(source, /不會自動重送/);
+assert.match(source, /marker-fault/);
+assert.match(source, /!d\.staged&&!d\.markerFault/);
+assert.match(source, /otaResetTerminalNoStaged\(\)/);
+assert.equal((source.match(/async function mutate\(/g) || []).length, 1);
 
 let acceptedRequest = 0;
 let currentSession = null;

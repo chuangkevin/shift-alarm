@@ -16,6 +16,7 @@
 #include <qrcode.h>
 #include <driver/i2s.h>
 #include <nvs_flash.h>
+#include <nvs.h>
 #include <esp_heap_caps.h>
 #include <esp_app_desc.h>
 #include <time.h>
@@ -90,6 +91,7 @@ uint8_t displayRotation=0;
 uint16_t screenTimeoutMinutes=0;
 uint8_t screenBrightness=40;
 bool screenAwake=true;
+bool updateInfoPage=false;
 uint32_t screenLastActivity=0;
 bool forceDraw=true;
 uint32_t previousFrameHash=0;
@@ -97,7 +99,7 @@ bool displaySettingsValid=false;
 adc_oneshot_unit_handle_t batteryAdc=nullptr;
 battery::State batteryState;
 bool chargingInputValid=false;
-bool charging=false;
+std::atomic<bool> charging{false};
 
 constexpr char DISPLAY_SETTINGS_KEY[]="display-v1";
 bool saveDisplaySettings(uint8_t rotation,uint16_t timeoutMinutes,uint8_t brightness){
@@ -240,6 +242,16 @@ void draw() {
   if(!screenAwake)return;
   fill(ringing && (millis()/500)%2 ? 0x7800 : 0); surface.setTextColor(0xffff);
 #if CUBE_TFT
+  if(updateInfoPage&&!ringing&&!portal){
+    line(8,6,"檢查更新",2);line(8,40,String("目前版本：")+VERSION);
+    alarm_ota_status_t ota={};alarm_ota_get_status(&ota);
+    line(8,61,ota.marker_fault?"更新記錄狀態不明":ota.staged_valid?String("已儲存：")+ota.staged.manifest.version:"沒有已下載更新");
+    line(8,82,chargingInputValid&&charging.load()?"充電狀態：可安裝":"充電狀態：不可安裝");
+    String url=WiFi.isConnected()?String("http://")+WiFi.localIP().toString()+"/update":"請先連上無線網路";line(8,103,url);
+    if(WiFi.isConnected()&&url.length()<=180){uint8_t data[qrcode_getBufferSize(8)];QRCode qr;if(qrcode_initText(&qr,data,8,ECC_LOW,url.c_str())==0){const int scale=2,x=8,y=130;surface.fillRect(x-8,y-8,(qr.size+8)*scale,(qr.size+8)*scale,0xffff);for(int row=0;row<qr.size;row++)for(int col=0;col<qr.size;col++)if(qrcode_getModule(&qr,col,row))surface.fillRect(x+col*scale,y+row*scale,scale,scale,0);}}
+    line(115,133,"掃碼開啟更新頁");line(115,154,"實體鍵不會安裝");line(115,175,"－：返回主畫面");
+    uint16_t *pixels=frame->getBuffer();uint32_t hash=2166136261u;for(size_t i=0;i<240*240;i++){hash^=pixels[i];hash*=16777619u;}if(forceDraw||hash!=previousFrameHash){screen.drawRGBBitmap(0,0,pixels,240,240);previousFrameHash=hash;forceDraw=false;}return;
+  }
   line(8,4,"班表鬧鐘",2); line(8,31,pairingHoldActive?String("配網倒數 ")+String(10-(millis()-pairingHoldStarted)/1000):clockValid()?datetime(time(nullptr)):"等待校時",2);
   int batteryPercent=0;uint32_t batteryAge=0;const bool batteryValid=battery::value(batteryState,millis(),batteryPercent,batteryAge);
   const uint16_t batteryColor=batteryValid&&batteryPercent<=20?0xf800:0xffff;
@@ -353,47 +365,42 @@ String devicePage(String content) {
 }
 bool localNonce();
 std::atomic<uint32_t> otaReceived{0},otaTotal{0};
-std::atomic<bool> otaBusy{false},otaPowerConfirmed{false};
+std::atomic<bool> otaBusy{false};
 std::atomic<uint32_t> otaReconnectCount{0},otaLastProgressMs{0},otaStatusSequence{0};
 char otaBootSession[17]={};
 std::atomic<int> otaLastHttpStatus{0};
-std::atomic<alarm_ota_handle_t> otaActivation{0};
+std::atomic<bool> otaActivation{false};
 bool otaReady=false;int otaSession;
 portMUX_TYPE otaMux=portMUX_INITIALIZER_UNLOCKED;
 alarm_ota_guard_t otaGuard={};char otaMessage[128]="尚未檢查更新",otaPhase[24]="idle",otaReason[32]="idle";
+char otaBackendLatestVersion[ALARM_OTA_NAME_CAP]={};
 void otaMessageSet(const char *message){portENTER_CRITICAL(&otaMux);strlcpy(otaMessage,message,sizeof(otaMessage));portEXIT_CRITICAL(&otaMux);}
 String otaMessageGet(){char msg[128];portENTER_CRITICAL(&otaMux);memcpy(msg,otaMessage,sizeof(msg));portEXIT_CRITICAL(&otaMux);return String(msg);}
 void otaStateSet(const char *phase,const char *reason,const char *message){portENTER_CRITICAL(&otaMux);strlcpy(otaPhase,phase,sizeof(otaPhase));strlcpy(otaReason,reason,sizeof(otaReason));strlcpy(otaMessage,message,sizeof(otaMessage));portEXIT_CRITICAL(&otaMux);otaStatusSequence.fetch_add(1);}
 String otaPhaseGet(){char value[sizeof(otaPhase)];portENTER_CRITICAL(&otaMux);memcpy(value,otaPhase,sizeof(value));portEXIT_CRITICAL(&otaMux);return String(value);}
 String otaReasonGet(){char value[sizeof(otaReason)];portENTER_CRITICAL(&otaMux);memcpy(value,otaReason,sizeof(value));portEXIT_CRITICAL(&otaMux);return String(value);}
+void otaResetTerminalNoStaged(){otaReceived=0;otaTotal=0;otaLastProgressMs=0;}
 bool otaAuthorize(const void *request,void*){return request==&otaSession&&otaBusy.load();}
-esp_err_t otaReadGuard(alarm_ota_guard_t *out,void*){portENTER_CRITICAL(&otaMux);*out=otaGuard;portEXIT_CRITICAL(&otaMux);out->operator_confirmed_power=otaPowerConfirmed.load();out->ringing=ringing;out->now_epoch=time(nullptr);return ESP_OK;}
+bool readChargingNow(bool &active){if(!chargingInputValid)return false;const int level=gpio_get_level(GPIO_NUM_38);if(level!=0&&level!=1)return false;active=battery::charging_active(level);charging=active;return true;}
+esp_err_t otaReadGuard(alarm_ota_guard_t *out,void*){portENTER_CRITICAL(&otaMux);*out=otaGuard;portEXIT_CRITICAL(&otaMux);out->charging_valid=readChargingNow(out->charging);out->ringing=ringing;out->now_epoch=time(nullptr);return ESP_OK;}
 void refreshOtaGuard(){alarm_ota_guard_t g={};g.clock_valid=clockValid();g.ringing=ringing;g.snoozed=snooze>0;g.schedule_ready=!revision.isEmpty();g.now_epoch=time(nullptr);int64_t next=snooze>0?snooze:INT64_MAX;for(auto &a:alarms)if(alarmclock::upcoming(a.epoch,g.now_epoch,handled)&&a.epoch<next)next=a.epoch;g.next_alarm_epoch=next==INT64_MAX?0:next;portENTER_CRITICAL(&otaMux);otaGuard=g;portEXIT_CRITICAL(&otaMux);}
 bool backendReachableNow(uint32_t nowMs){
   return connectivity::backend_reachable(
     WiFi.isConnected(),backendLastResult.load(),backendHasSuccess.load(),
     nowMs,backendLastSuccessMs.load());
 }
-const char *otaStartReason(){
+const char *otaLocalReason(){
   if(!otaReady){
     return "ota-not-ready";
   }
   if(otaBusy.load()){
     return "busy";
   }
-  if(!WiFi.isConnected()){
-    return "wifi-not-ready";
-  }
-  alarm_tailnet_status_t tail={};
-  alarm_tailnet_get_status(&tail);
-  if(tail.state!=ALARM_TAILNET_CONNECTED||!tail.acl_ready){
-    return "tailnet-not-ready";
-  }
-  if(!backendReachableNow(millis())){
-    return "backend-not-reachable";
-  }
+  alarm_ota_status_t marker={};
+  if(alarm_ota_get_status(&marker)!=ESP_OK||marker.marker_fault)return "marker-fault";
   alarm_ota_guard_t guard={};
   otaReadGuard(&guard,nullptr);
+  if(!guard.charging_valid||!guard.charging){return "charging-required";}
   if(!guard.clock_valid){
     return "clock-not-ready";
   }
@@ -412,6 +419,20 @@ const char *otaStartReason(){
   }
   return "ready";
 }
+const char *otaDownloadReason(){
+  const char *local=otaLocalReason();if(strcmp(local,"ready"))return local;
+  alarm_ota_status_t status={};if(alarm_ota_get_status(&status)==ESP_OK&&status.staged_valid)return "staged-update-exists";
+  if(!WiFi.isConnected())return "wifi-not-ready";
+  alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);
+  if(tail.state!=ALARM_TAILNET_CONNECTED||!tail.acl_ready)return "tailnet-not-ready";
+  if(!backendReachableNow(millis()))return "backend-not-reachable";
+  return "ready";
+}
+const char *otaInstallReason(){if(!otaReady)return "ota-not-ready";if(otaBusy.load())return "busy";alarm_ota_status_t status={};if(alarm_ota_get_status(&status)!=ESP_OK||status.marker_fault)return "marker-fault";if(!status.staged_valid)return "no-staged-update";return otaLocalReason();}
+constexpr char OTA_MARKER_KEY[]="ota-stage-v1";
+esp_err_t otaMarkerLoad(alarm_ota_staged_record_t *out,void*){nvs_handle_t handle;esp_err_t err=nvs_open_from_partition("alarm_nvs","shift-alarm",NVS_READONLY,&handle);if(err!=ESP_OK)return err;size_t size=sizeof(*out);err=nvs_get_blob(handle,OTA_MARKER_KEY,out,&size);nvs_close(handle);if(err==ESP_ERR_NVS_NOT_FOUND)return ESP_ERR_NOT_FOUND;if(err!=ESP_OK)return err;return size==sizeof(*out)?ESP_OK:ESP_ERR_INVALID_SIZE;}
+esp_err_t otaMarkerStore(const alarm_ota_staged_record_t *record,void*){nvs_handle_t handle;esp_err_t err=nvs_open_from_partition("alarm_nvs","shift-alarm",NVS_READWRITE,&handle);if(err!=ESP_OK)return err;err=nvs_set_blob(handle,OTA_MARKER_KEY,record,sizeof(*record));if(err==ESP_OK)err=nvs_commit(handle);nvs_close(handle);return err;}
+esp_err_t otaMarkerClear(void*){nvs_handle_t handle;esp_err_t err=nvs_open_from_partition("alarm_nvs","shift-alarm",NVS_READWRITE,&handle);if(err!=ESP_OK)return err;err=nvs_erase_key(handle,OTA_MARKER_KEY);if(err==ESP_ERR_NVS_NOT_FOUND)err=ESP_OK;else if(err==ESP_OK)err=nvs_commit(handle);nvs_close(handle);return err;}
 esp_err_t otaDiagnostics(void*){
   if(!frame||!frame->getBuffer()||!prefs.isKey("ap-pass")||!displaySettingsValid||!savedScheduleRestored||
      !deviceRoutesReady||ESP.getPsramSize()<8*1024*1024||WiFi.getMode()==WIFI_OFF)return ESP_FAIL;
@@ -441,7 +462,7 @@ bool boundedHttpBody(HTTPClient &h,size_t maximum,String &out,uint32_t timeoutMs
 }
 void otaWorker(void*){
  {
-  bool readyToActivate=false;
+  bool stagedComplete=false;
   alarm_ota_handle_t handle=0;HTTPClient h;esp_err_t err=ESP_FAIL;
   do{
     otaStateSet("checking","checking","正在檢查更新版本");
@@ -457,8 +478,9 @@ void otaWorker(void*){
     const char *board=m["board"]|"",*version=m["version"]|"",*sha=m["sha256"]|"",*mac=m["hmac_sha256"]|"";
     if(strlen(board)>=sizeof(manifest.board)||strlen(version)>=sizeof(manifest.version)||strlen(sha)!=64||strlen(mac)!=64||!m["size"].is<uint32_t>()){otaStateSet("error","manifest-fields","更新資訊格式無效");break;}
     strlcpy(manifest.board,board,sizeof(manifest.board));strlcpy(manifest.version,version,sizeof(manifest.version));strlcpy(manifest.sha256,sha,sizeof(manifest.sha256));strlcpy(manifest.hmac_sha256,mac,sizeof(manifest.hmac_sha256));manifest.size=m["size"];
+    portENTER_CRITICAL(&otaMux);strlcpy(otaBackendLatestVersion,manifest.version,sizeof(otaBackendLatestVersion));portEXIT_CRITICAL(&otaMux);
     otaTotal.store(manifest.size);
-    err=alarm_ota_begin(&manifest,&otaSession,&handle);if(err!=ESP_OK){otaStateSet("error","guard-rejected","更新遭拒：請確認版本、排程與電源");break;}
+    err=alarm_ota_begin(&manifest,&otaSession,&handle);if(err!=ESP_OK){otaStateSet("error",err==ALARM_OTA_ERR_MARKER?"marker-fault":err==ALARM_OTA_ERR_CHARGING_REQUIRED?"charging-required":"guard-rejected",err==ALARM_OTA_ERR_MARKER?"更新記錄狀態不明，已封鎖下載":err==ALARM_OTA_ERR_CHARGING_REQUIRED?"裝置未顯示充電，已拒絕下載":"更新遭拒：請確認版本與排程");break;}
     const String firmwareUrl=backend+"/api/device/firmware/"+manifest.sha256+".bin";
     h.begin(firmwareUrl);h.addHeader("Authorization",String("Bearer ")+token);
     otaLastHttpStatus.store(h.GET());if(otaLastHttpStatus.load()!=200||h.getSize()!=int(manifest.size)){otaStateSet("error","download-http","更新檔大小或回應不正確");break;}
@@ -481,24 +503,38 @@ void otaWorker(void*){
       if(available<=0){vTaskDelay(pdMS_TO_TICKS(1));continue;}
       size_t need=std::min(sizeof(buffer),std::min(size_t(available),size_t(manifest.size-received)));
       int n=stream->read(buffer,need);
-      if(n<=0||alarm_ota_write(handle,&otaSession,buffer,size_t(n))!=ESP_OK){failure="更新寫入或安全檢查失敗，保留原有版本";break;}
+      if(n<=0){failure="更新串流讀取失敗，保留原有版本";break;}err=alarm_ota_write(handle,&otaSession,buffer,size_t(n));if(err!=ESP_OK){failure=err==ALARM_OTA_ERR_CHARGING_REQUIRED?"充電狀態中斷，已停止下載":"更新寫入或安全檢查失敗，保留原有版本";break;}
       received+=size_t(n);otaReceived.store(received);lastProgress=millis();otaLastProgressMs.store(lastProgress);vTaskDelay(1);
     }
-    h.end();if(failure){otaStateSet("error","resume-failed",failure);break;}
-    otaStateSet("verifying","verifying","下載完成，正在驗證");if(alarm_ota_finish(handle,&otaSession)!=ESP_OK){otaStateSet("error","verification-failed","更新驗證失敗，保留原有版本");break;}
-    otaStateSet("restarting","restarting","驗證通過，準備重新啟動");
-    readyToActivate=true;
+    h.end();if(failure){otaStateSet("error",err==ALARM_OTA_ERR_CHARGING_REQUIRED?"charging-required":"resume-failed",failure);break;}
+    otaStateSet("verifying","verifying","下載完成，正在驗證");err=alarm_ota_finish(handle,&otaSession);if(err!=ESP_OK){otaStateSet("error",err==ALARM_OTA_ERR_CHARGING_REQUIRED?"charging-required":"verification-failed",err==ALARM_OTA_ERR_CHARGING_REQUIRED?"裝置未顯示充電，未保存更新":"更新驗證失敗，保留原有版本");break;}
+    otaStateSet("staged","ready","更新已完整下載並驗證，可稍後離線安裝");
+    stagedComplete=true;
   }while(false);
   h.end();
-  if(readyToActivate)otaActivation.store(handle);
-  else {if(handle)alarm_ota_abort(handle,&otaSession);otaPowerConfirmed=false;otaBusy=false;}
+   if(!stagedComplete&&handle)alarm_ota_abort(handle,&otaSession);
+   alarm_ota_status_t terminal={};if(alarm_ota_get_status(&terminal)==ESP_OK&&terminal.state!=ALARM_OTA_RECEIVING&&terminal.state!=ALARM_OTA_STAGED)otaResetTerminalNoStaged();
+   otaBusy=false;
  }
  vTaskDelete(nullptr);
 }
-void otaRoutes(){
- server.on("/update",HTTP_GET,[]{String page=R"HTML(<h1>裝置更新</h1><p>更新寫入備用分區，通過驗證才重新啟動。響鈴中、貪睡中或五分鐘內有鬧鐘時不進行更新。</p><p id="status">正在取得狀態…</p><form id="update"><label><input type="checkbox" id="power" required>我已接上穩定電源，更新完成前不拔除</label><button id="start-update" disabled>檢查並安裝已發布版本</button></form><p class="help">電源確認由你提供，裝置未量測外接電壓。更新失敗會保留原有版本。</p><a href="/display">返回裝置設定</a><script>const nonce='NONCE',statusEl=document.querySelector('#status'),startButton=document.querySelector('#start-update');let currentSession=null,newest=0,nextRequest=0,acceptedRequest=0;/* OTA_STATUS_POLICY_START */function recordUpdateFailure(requestId){if(requestId>acceptedRequest)acceptedRequest=requestId}function acceptUpdateStatus(d,requestId){if(requestId<acceptedRequest)return false;if(currentSession===null||d.session!==currentSession){currentSession=d.session;newest=d.sequence;acceptedRequest=requestId;return true}if(d.sequence<newest)return false;newest=d.sequence;acceptedRequest=requestId;return true}/* OTA_STATUS_POLICY_END */const reasons={ready:'可以開始更新',busy:'更新正在進行中','ota-not-ready':'更新功能尚未就緒','wifi-not-ready':'無線網路尚未連線','tailnet-not-ready':'Tailscale 尚未就緒','backend-not-reachable':'更新後端目前無法連線','clock-not-ready':'裝置尚未校時','alarm-active':'鬧鐘正在響鈴',snoozed:'貪睡提醒尚未結束','schedule-not-ready':'排程尚未就緒','alarm-near':'五分鐘內有鬧鐘'};async function refresh(){const requestId=++nextRequest;try{const r=await fetch('/api/update',{headers:{'X-Setup-Nonce':nonce},cache:'no-store'});const d=await r.json();if(!acceptUpdateStatus(d,requestId))return;startButton.disabled=!d.canStart;statusEl.textContent=(d.phase==='error'?d.message:(reasons[d.reason]||d.message))+(d.total>0?'（已接收 '+d.received+' / '+d.total+' 位元組，'+Math.floor(d.received*100/d.total)+'%）':'');}catch(e){recordUpdateFailure(requestId);if(requestId>=acceptedRequest)statusEl.textContent='裝置可能正在重新啟動；保留上次更新狀態，稍後自動重試。'}}document.querySelector('#update').onsubmit=async(e)=>{e.preventDefault();if(startButton.disabled||!document.querySelector('#power').checked)return;startButton.disabled=true;acceptedRequest=++nextRequest;try{const r=await fetch('/api/update/start',{method:'POST',headers:{'X-Setup-Nonce':nonce,'Content-Type':'application/x-www-form-urlencoded'},body:'power_confirmed=1'});statusEl.textContent=await r.text();}catch(e){statusEl.textContent='啟動請求結果不明；不會自動重送，請等候狀態更新。'}};refresh();setInterval(refresh,3000);</script>)HTML";page.replace("NONCE",setupNonce);server.send(200,"text/html; charset=utf-8",devicePage(page));});
- server.on("/api/update",HTTP_GET,[]{refreshOtaGuard();const char *reason=otaStartReason();String phase=otaPhaseGet();JsonDocument d;d["message"]=otaMessageGet();d["phase"]=phase;d["reason"]=reason;d["lastReason"]=otaReasonGet();d["session"]=otaBootSession;d["sequence"]=otaStatusSequence.load();d["busy"]=otaBusy.load();d["ready"]=otaReady;d["canStart"]=strcmp(reason,"ready")==0;d["received"]=otaReceived.load();d["total"]=otaTotal.load();d["reconnectCount"]=otaReconnectCount.load();d["lastHttpStatus"]=otaLastHttpStatus.load();uint32_t progress=otaLastProgressMs.load();if(progress)d["lastProgressAgeSeconds"]=(millis()-progress)/1000;else d["lastProgressAgeSeconds"]=nullptr;String out;serializeJson(d,out);server.send(200,"application/json",out);});
- server.on("/api/update/start",HTTP_POST,[]{if(!localNonce())return;refreshOtaGuard();const char *reason=otaStartReason();if(strcmp(reason,"ready")!=0){server.send(409,"text/plain; charset=utf-8",String("目前不能更新：")+reason);return;}if(server.arg("power_confirmed")!="1"){server.send(400,"text/plain; charset=utf-8","請先確認穩定供電");return;}bool expected=false;if(!otaBusy.compare_exchange_strong(expected,true)){server.send(409,"text/plain; charset=utf-8","更新正在進行中");return;}otaReceived.store(0);otaTotal.store(0);otaReconnectCount.store(0);otaLastHttpStatus.store(0);otaLastProgressMs.store(millis());otaPowerConfirmed=true;otaStateSet("starting","starting","開始檢查更新");if(xTaskCreate(otaWorker,"alarm_update",12288,nullptr,1,nullptr)!=pdPASS){otaBusy=false;otaPowerConfirmed=false;otaStateSet("error","worker-start-failed","記憶體不足，請稍後重試");server.send(503,"text/plain; charset=utf-8","記憶體不足，請稍後重試");return;}server.send(202,"text/plain; charset=utf-8","開始檢查更新");});
+void otaStagedRoutes() {
+  server.on("/update", HTTP_GET, [] {
+    String page=R"HTML(<h1>裝置更新</h1><p>下載與安裝是兩個分開的步驟。完整下載並驗證後，更新會保存在備用分區；下載完成不會重新啟動。</p><div class="upload-box"><strong>供電限制</strong><p>下載與安裝時，裝置都必須由 GPIO38 顯示「充電中」。這是充電狀態，不是可靠的 USB／VBUS 偵測。電池完整充電時即使接著 USB，也可能因未顯示充電而拒絕下載或安裝。</p><p>下載中斷後，同一次開機可安全續傳；若重新開機，部分檔案不會保存，重新開機後會從 0 重新下載。完整且已驗證的更新可在沒有 Wi-Fi、Tailscale 或後端時稍後安裝。</p></div><p>目前版本：<strong id="current-version">讀取中</strong></p><p>最新版本：<strong id="latest-version">尚未檢查</strong></p><p>已下載版本：<strong id="staged-version">沒有</strong></p><p id="status" role="status">正在取得狀態…</p><progress id="progress" max="100" value="0" style="width:100%"></progress><div class="button-row"><button id="download-update" disabled>下載更新</button><button id="install-update" disabled>安裝並重新啟動</button><button id="discard-update" class="secondary" disabled>刪除已下載更新</button></div><p class="help">按鈕只會各送出一次請求；回應不明時先讀取狀態，不會自動重送。</p><a href="/display">返回裝置設定</a><style>.button-row{display:flex;gap:10px;flex-wrap:wrap}.button-row button{flex:1 1 190px}progress{height:18px}@media(max-width:600px){.button-row{display:grid}.button-row button{width:100%}}</style><script>
+const nonce='NONCE',statusEl=document.querySelector('#status'),downloadButton=document.querySelector('#download-update'),installButton=document.querySelector('#install-update'),discardButton=document.querySelector('#discard-update');let currentSession=null,newest=0,nextRequest=0,acceptedRequest=0,mutationPending=false;/* OTA_STATUS_POLICY_START */function recordUpdateFailure(requestId){if(requestId>acceptedRequest)acceptedRequest=requestId}function acceptUpdateStatus(d,requestId){if(requestId<acceptedRequest)return false;if(currentSession===null||d.session!==currentSession){currentSession=d.session;newest=d.sequence;acceptedRequest=requestId;return true}if(d.sequence<newest)return false;newest=d.sequence;acceptedRequest=requestId;return true}/* OTA_STATUS_POLICY_END */const reasons={ready:'可以操作',busy:'更新操作進行中','marker-fault':'更新記錄狀態不明；下載與安裝已封鎖，可嘗試刪除後重新讀取','charging-required':'裝置目前未顯示充電','ota-not-ready':'更新功能尚未就緒','wifi-not-ready':'無線網路尚未連線','tailnet-not-ready':'Tailscale 尚未就緒','backend-not-reachable':'更新後端目前無法連線','clock-not-ready':'裝置尚未校時','alarm-active':'鬧鐘正在響鈴',snoozed:'貪睡提醒尚未結束','schedule-not-ready':'排程尚未就緒','alarm-near':'五分鐘內有鬧鐘','no-staged-update':'沒有已下載更新','staged-update-exists':'請先安裝或刪除已下載更新'};async function refresh(){const requestId=++nextRequest;try{const r=await fetch('/api/update',{headers:{'X-Setup-Nonce':nonce},cache:'no-store'});const d=await r.json();if(!acceptUpdateStatus(d,requestId))return;document.querySelector('#current-version').textContent=d.currentVersion;document.querySelector('#latest-version').textContent=d.latestVersion||'尚未檢查';document.querySelector('#staged-version').textContent=d.staged?d.staged.version:'沒有';downloadButton.disabled=mutationPending||d.busy||!d.canDownload;installButton.disabled=mutationPending||d.busy||!d.canInstall;discardButton.disabled=mutationPending||d.busy||(!d.staged&&!d.markerFault);const percent=d.total?Math.floor(d.received*100/d.total):0;document.querySelector('#progress').value=percent;statusEl.textContent=d.message+'；下載：'+(reasons[d.downloadReason]||d.downloadReason)+'；安裝：'+(reasons[d.installReason]||d.installReason)+(d.total?'（'+d.received+' / '+d.total+' 位元組，'+percent+'%）':'');}catch(e){recordUpdateFailure(requestId);statusEl.textContent='裝置連線中斷；保留上次顯示，稍後只重新讀取狀態。'}}async function mutate(path){if(mutationPending)return;mutationPending=true;downloadButton.disabled=installButton.disabled=discardButton.disabled=true;try{const r=await fetch(path,{method:'POST',headers:{'X-Setup-Nonce':nonce}});statusEl.textContent=await r.text();}catch(e){statusEl.textContent='請求結果不明；不會自動重送，請等待唯讀狀態更新。'}finally{mutationPending=false;setTimeout(refresh,500)}}downloadButton.onclick=()=>mutate('/api/update/download');installButton.onclick=()=>mutate('/api/update/install');discardButton.onclick=()=>mutate('/api/update/discard');refresh();setInterval(refresh,2000);
+</script>)HTML";
+    page.replace("NONCE", setupNonce);
+    server.send(200, "text/html; charset=utf-8", devicePage(page));
+  });
+  server.on("/api/update",HTTP_GET,[]{
+    refreshOtaGuard();alarm_ota_status_t status={};alarm_ota_get_status(&status);const bool reloading=status.marker_fault&&!otaBusy.load();if(reloading){alarm_ota_load_staged();alarm_ota_get_status(&status);if(status.staged_valid){otaReceived=status.staged.manifest.size;otaTotal=status.staged.manifest.size;otaStateSet("staged","ready","已重新載入完整驗證的更新");}else if(status.state==ALARM_OTA_IDLE){otaResetTerminalNoStaged();otaStateSet("idle","idle","已確認沒有已下載更新");}}if(status.state!=ALARM_OTA_RECEIVING&&status.state!=ALARM_OTA_STAGED&&!otaBusy.load())otaResetTerminalNoStaged();const char *download=otaDownloadReason(),*install=otaInstallReason();JsonDocument d;
+    d["currentVersion"]=VERSION;d["phase"]=status.marker_fault?"marker-fault":otaPhaseGet();d["message"]=status.marker_fault?"更新記錄狀態不明，已封鎖下載與安裝":otaMessageGet();d["lastReason"]=status.marker_fault?"marker-fault":otaReasonGet();d["session"]=otaBootSession;d["sequence"]=otaStatusSequence.load();d["busy"]=otaBusy.load();d["ready"]=otaReady;d["markerFault"]=status.marker_fault;d["canDownload"]=strcmp(download,"ready")==0;d["downloadReason"]=download;d["canInstall"]=strcmp(install,"ready")==0;d["installReason"]=install;d["received"]=otaReceived.load();d["total"]=otaTotal.load();d["reconnectCount"]=otaReconnectCount.load();d["lastHttpStatus"]=otaLastHttpStatus.load();portENTER_CRITICAL(&otaMux);if(otaBackendLatestVersion[0])d["latestVersion"]=otaBackendLatestVersion;else d["latestVersion"]=nullptr;portEXIT_CRITICAL(&otaMux);
+    if(status.staged_valid){JsonObject s=d["staged"].to<JsonObject>();s["schema"]=status.staged.schema;s["board"]=status.staged.manifest.board;s["version"]=status.staged.manifest.version;s["size"]=status.staged.manifest.size;s["sha256"]=status.staged.manifest.sha256;}else d["staged"]=nullptr;
+    uint32_t progress=otaLastProgressMs.load();if(progress)d["lastProgressAgeSeconds"]=(millis()-progress)/1000;else d["lastProgressAgeSeconds"]=nullptr;String out;serializeJson(d,out);server.send(200,"application/json",out);
+  });
+  server.on("/api/update/download",HTTP_POST,[]{if(!localNonce())return;refreshOtaGuard();const char *reason=otaDownloadReason();if(strcmp(reason,"ready")){server.send(409,"text/plain; charset=utf-8",String("目前不能下載：")+reason);return;}bool expected=false;if(!otaBusy.compare_exchange_strong(expected,true)){server.send(409,"text/plain; charset=utf-8","更新操作進行中");return;}otaReceived=0;otaTotal=0;otaReconnectCount=0;otaLastHttpStatus=0;otaLastProgressMs=millis();otaStateSet("starting","starting","開始檢查更新");if(xTaskCreate(otaWorker,"alarm_update",12288,nullptr,1,nullptr)!=pdPASS){otaBusy=false;otaStateSet("error","worker-start-failed","記憶體不足，請稍後重試");server.send(503,"text/plain; charset=utf-8","記憶體不足，請稍後重試");return;}server.send(202,"text/plain; charset=utf-8","已開始下載；完成後不會重新啟動");});
+  server.on("/api/update/install",HTTP_POST,[]{if(!localNonce())return;refreshOtaGuard();const char *reason=otaInstallReason();if(strcmp(reason,"ready")){server.send(409,"text/plain; charset=utf-8",String("目前不能安裝：")+reason);return;}bool expected=false;if(!otaBusy.compare_exchange_strong(expected,true)){server.send(409,"text/plain; charset=utf-8","更新操作進行中");return;}otaStateSet("verifying-local","verifying-local","正在從本機 Flash 完整驗證更新");otaActivation=true;server.send(202,"text/plain; charset=utf-8","已接受安裝，驗證通過後重新啟動");});
+  server.on("/api/update/discard",HTTP_POST,[]{if(!localNonce())return;bool expected=false;if(!otaBusy.compare_exchange_strong(expected,true)){server.send(409,"text/plain; charset=utf-8","更新操作進行中");return;}esp_err_t err=alarm_ota_discard_staged(&otaSession);otaBusy=false;if(err==ESP_OK){otaResetTerminalNoStaged();otaStateSet("idle","discarded","已確認沒有已下載更新");server.send(200,"text/plain; charset=utf-8","已確認沒有已下載更新");}else{alarm_ota_status_t status={};alarm_ota_get_status(&status);otaStateSet(status.marker_fault?"marker-fault":"staged",status.marker_fault?"marker-fault":"discard-failed",status.marker_fault?"更新記錄狀態不明，操作維持封鎖":"刪除未完成，已下載更新仍保留");server.send(500,"text/plain; charset=utf-8",status.marker_fault?"更新記錄狀態不明，操作維持封鎖":"刪除未完成，已下載更新仍保留");}});
 }
 String tailnetLabel(alarm_tailnet_state_t state) {
   switch(state){case ALARM_TAILNET_CONNECTED:return "Tailscale已連線";case ALARM_TAILNET_AUTH_REQUIRED:return "等待登入授權";case ALARM_TAILNET_EXPIRED:return "授權已到期";case ALARM_TAILNET_BLOCKED:return "存取規則尚未通過";case ALARM_TAILNET_CONNECTING:return "正在連線";default:return "尚未連線";}
@@ -552,9 +588,9 @@ void routes() {
     request.sendHeader("Cache-Control","no-store");request.sendHeader("X-Frame-Options","DENY");request.sendHeader("Referrer-Policy","no-referrer");
     return next();
   });
-  const char *headers[]={"Authorization","X-Setup-Nonce"}; server.collectHeaders(headers,2);tailnetRoutes();otaRoutes();localCalendarRoutes();
+  const char *headers[]={"Authorization","X-Setup-Nonce"}; server.collectHeaders(headers,2);tailnetRoutes();otaStagedRoutes();localCalendarRoutes();
   server.on("/api/clock",HTTP_GET,[]{JsonDocument d;d["ready"]=clockValid();d["last_sync"]=lastNetworkClock.load();d["interval_seconds"]=CLOCK_SYNC_INTERVAL_MS/1000;d["overdue"]=lastNetworkClock.load()?millis()-lastNetworkClockMs.load()>CLOCK_SYNC_INTERVAL_MS+300000:millis()-bootMs>120000;String out;serializeJson(d,out);server.send(200,"application/json",out);});
-  server.on("/api/status",HTTP_GET,[]{ JsonDocument d; d["version"]=VERSION;d["displaySettingsValid"]=displaySettingsValid;alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);d["tailnetLifecycle"]=tail.lifecycle==ALARM_TAILNET_QUEUED?"queued":tail.lifecycle==ALARM_TAILNET_STARTING?"starting":tail.lifecycle==ALARM_TAILNET_RUNNING?"running":tail.lifecycle==ALARM_TAILNET_RETRY_WAIT?"retry_wait":tail.lifecycle==ALARM_TAILNET_LIFECYCLE_BLOCKED?"blocked":"off";d["tailnetLifecycleLabel"]=tailnetLifecycleLabel(tail.lifecycle);d["tailnetRetryCount"]=tail.retry_count;d["backendTransport"]=backend=="http://100.126.226.79:8237"?"tailscale":"unsupported";d["backendHost"]=backend=="http://100.126.226.79:8237"?"100.126.226.79":"";const uint32_t nowMs=millis();d["backendReachable"]=backendReachableNow(nowMs);if(backendHasSuccess.load())d["backendLastSuccessAgeSeconds"]=(nowMs-backendLastSuccessMs.load())/1000;else d["backendLastSuccessAgeSeconds"]=nullptr;int percent=0;uint32_t age=0;JsonObject battery=d["battery"].to<JsonObject>();battery["schema"]=1;battery["valid"]=battery::value(batteryState,millis(),percent,age);if(battery["valid"].as<bool>()){battery["percent"]=percent;battery["sample_age_seconds"]=age;}else{battery["percent"]=nullptr;battery["sample_age_seconds"]=nullptr;}if(chargingInputValid)battery["charging"]=charging;else battery["charging"]=nullptr;d["localSchedule"]=localSchedule;d["firstConsecutiveOnly"]=firstConsecutiveOnly;d["rotation"]=displayRotation*90;d["screenTimeoutMinutes"]=screenTimeoutMinutes;d["screenBrightness"]=screenBrightness;d["screenAwake"]=screenAwake; d["revision"]=revision;d["clockReady"]=clockValid();d["epoch"]=time(nullptr);d["ringing"]=ringing;d["wifi"]=WiFi.isConnected();d["alarmCount"]=alarms.size();d["sync"]=syncState;String out;serializeJson(d,out);server.send(200,"application/json",out); });
+  server.on("/api/status",HTTP_GET,[]{ JsonDocument d; d["version"]=VERSION;d["displaySettingsValid"]=displaySettingsValid;alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);d["tailnetLifecycle"]=tail.lifecycle==ALARM_TAILNET_QUEUED?"queued":tail.lifecycle==ALARM_TAILNET_STARTING?"starting":tail.lifecycle==ALARM_TAILNET_RUNNING?"running":tail.lifecycle==ALARM_TAILNET_RETRY_WAIT?"retry_wait":tail.lifecycle==ALARM_TAILNET_LIFECYCLE_BLOCKED?"blocked":"off";d["tailnetLifecycleLabel"]=tailnetLifecycleLabel(tail.lifecycle);d["tailnetRetryCount"]=tail.retry_count;d["backendTransport"]=backend=="http://100.126.226.79:8237"?"tailscale":"unsupported";d["backendHost"]=backend=="http://100.126.226.79:8237"?"100.126.226.79":"";const uint32_t nowMs=millis();d["backendReachable"]=backendReachableNow(nowMs);if(backendHasSuccess.load())d["backendLastSuccessAgeSeconds"]=(nowMs-backendLastSuccessMs.load())/1000;else d["backendLastSuccessAgeSeconds"]=nullptr;int percent=0;uint32_t age=0;JsonObject battery=d["battery"].to<JsonObject>();battery["schema"]=1;battery["valid"]=battery::value(batteryState,millis(),percent,age);if(battery["valid"].as<bool>()){battery["percent"]=percent;battery["sample_age_seconds"]=age;}else{battery["percent"]=nullptr;battery["sample_age_seconds"]=nullptr;}if(chargingInputValid)battery["charging"]=charging.load();else battery["charging"]=nullptr;d["localSchedule"]=localSchedule;d["firstConsecutiveOnly"]=firstConsecutiveOnly;d["rotation"]=displayRotation*90;d["screenTimeoutMinutes"]=screenTimeoutMinutes;d["screenBrightness"]=screenBrightness;d["screenAwake"]=screenAwake; d["revision"]=revision;d["clockReady"]=clockValid();d["epoch"]=time(nullptr);d["ringing"]=ringing;d["wifi"]=WiFi.isConnected();d["alarmCount"]=alarms.size();d["sync"]=syncState;String out;serializeJson(d,out);server.send(200,"application/json",out); });
   server.on("/display",HTTP_GET,[]{
     String page=String("<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>裝置設定</title><style>body{font:20px system-ui;padding:24px}button,select{font:20px system-ui;padding:12px;margin:12px 0}</style><h1>裝置設定</h1><a class='primary-link' href='/calendar'>設定班表與鬧鐘</a><h2>螢幕</h2><form method='post' action='/display'><input type='hidden' name='nonce' value='")+setupNonce+"'><label for='rotation'>顯示方向</label><select id='rotation' name='rotation'>";
     for(int r=0;r<4;r++)page+=String("<option value='")+r+"'"+(displayRotation==r?" selected":"")+">"+r*90+"°"+(r==0?"（正常）":r==2?"（上下顛倒）":"")+"</option>";
@@ -621,7 +657,7 @@ void pollBackend() {
   JsonDocument d;d["revision"]=revision;d["status"]=ringing?"ringing":(clockValid()?"ready":"waiting_for_time");d["ip"]=WiFi.localIP().toString();
   int64_t next=INT64_MAX;for(auto &a:alarms)if(alarmclock::upcoming(a.epoch,time(nullptr),handled)&&a.epoch<next)next=a.epoch;
   if(next!=INT64_MAX)d["next_alarm"]=next;
-  int percent=0;uint32_t age=0;JsonObject battery=d["battery"].to<JsonObject>();battery["schema"]=1;battery["valid"]=battery::value(batteryState,millis(),percent,age);if(battery["valid"].as<bool>()){battery["percent"]=percent;battery["sample_age_seconds"]=age;}else{battery["percent"]=nullptr;battery["sample_age_seconds"]=nullptr;}if(chargingInputValid)battery["charging"]=charging;else battery["charging"]=nullptr;
+  int percent=0;uint32_t age=0;JsonObject battery=d["battery"].to<JsonObject>();battery["schema"]=1;battery["valid"]=battery::value(batteryState,millis(),percent,age);if(battery["valid"].as<bool>()){battery["percent"]=percent;battery["sample_age_seconds"]=age;}else{battery["percent"]=nullptr;battery["sample_age_seconds"]=nullptr;}if(chargingInputValid)battery["charging"]=charging.load();else battery["charging"]=nullptr;
   String body;serializeJson(d,body);h.begin(backend+"/api/device/heartbeat");h.addHeader("Authorization",String("Bearer ")+token);h.addHeader("Content-Type","application/json");const int heartbeatStatus=h.POST(body);backendLastResult.store(heartbeatStatus==200);if(heartbeatStatus==200){backendLastSuccessMs.store(millis());backendHasSuccess.store(true);}h.end();
 }
 void setup() {
@@ -654,12 +690,12 @@ void setup() {
   i2s_config_t cfg={};cfg.mode=(i2s_mode_t)(I2S_MODE_MASTER|I2S_MODE_TX);cfg.sample_rate=24000;cfg.bits_per_sample=I2S_BITS_PER_SAMPLE_16BIT;cfg.channel_format=I2S_CHANNEL_FMT_RIGHT_LEFT;cfg.communication_format=I2S_COMM_FORMAT_STAND_I2S;cfg.intr_alloc_flags=ESP_INTR_FLAG_LEVEL1;cfg.dma_buf_count=6;cfg.dma_buf_len=256;cfg.tx_desc_auto_clear=true;
   i2s_pin_config_t pins={};pins.mck_io_num=I2S_PIN_NO_CHANGE;pins.bck_io_num=15;pins.ws_io_num=16;pins.data_out_num=7;pins.data_in_num=I2S_PIN_NO_CHANGE;
   ESP_ERROR_CHECK(i2s_driver_install(I2S_NUM_0,&cfg,0,nullptr));ESP_ERROR_CHECK(i2s_set_pin(I2S_NUM_0,&pins));if(xTaskCreatePinnedToCore(soundTask,"speaker",3072,nullptr,2,nullptr,0)!=pdPASS)abort();
-  alarm_ota_config_t otaConfig={};otaConfig.board_id="xingzhi-cube-1.54tft-wifi";otaConfig.device_token=(const uint8_t*)token.c_str();otaConfig.device_token_length=token.length();otaConfig.quiet_window_seconds=300;otaConfig.transfer_timeout_seconds=600;otaConfig.authorize=otaAuthorize;otaConfig.read_guard=otaReadGuard;
+  alarm_ota_config_t otaConfig={};otaConfig.board_id="xingzhi-cube-1.54tft-wifi";otaConfig.device_token=(const uint8_t*)token.c_str();otaConfig.device_token_length=token.length();otaConfig.quiet_window_seconds=300;otaConfig.transfer_timeout_seconds=600;otaConfig.authorize=otaAuthorize;otaConfig.read_guard=otaReadGuard;otaConfig.marker_load=otaMarkerLoad;otaConfig.marker_store=otaMarkerStore;otaConfig.marker_clear=otaMarkerClear;
   ESP_ERROR_CHECK(alarm_proxy_init("100.126.226.79",8237));
   setenv("TZ","CST-8",1);tzset();WiFi.mode(WIFI_STA);WiFi.setAutoReconnect(true);if(ssid.length())WiFi.begin(ssid.c_str(),password.c_str());else startPortal();
   esp_sntp_set_time_sync_notification_cb(networkClockSynced);esp_sntp_set_sync_interval(CLOCK_SYNC_INTERVAL_MS);configTime(8*3600,0,"pool.ntp.org","time.google.com");routes();proxyStarted=alarm_proxy_start()==ESP_OK;bootMs=millis();lastPoll=millis()-POLL_MS;draw();
   ESP_ERROR_CHECK(alarm_ota_boot_self_test(otaDiagnostics,nullptr,15000));
-  otaReady=alarm_ota_init(&otaConfig)==ESP_OK;
+  otaReady=alarm_ota_init(&otaConfig)==ESP_OK;if(otaReady){esp_err_t staged=alarm_ota_load_staged();alarm_ota_status_t status={};alarm_ota_get_status(&status);if(staged!=ESP_OK||status.marker_fault){otaStateSet("marker-fault","marker-fault","更新記錄狀態不明，已封鎖下載與安裝");}else if(status.staged_valid){otaReceived=status.staged.manifest.size;otaTotal=status.staged.manifest.size;otaStateSet("staged","ready","已載入完整驗證的更新，可離線安裝");}else otaResetTerminalNoStaged();}
   Serial.printf("SHIFT_ALARM_READY v%s\n",VERSION);Serial.printf("PSRAM_BYTES %lu\n",(unsigned long)ESP.getPsramSize());Serial.println(ssid.length()?"BOOT_WIFI_MODE SAVED":"BOOT_WIFI_MODE FIRST_SETUP");
 }
 void loop() {
@@ -693,7 +729,7 @@ void loop() {
     if(!pairingHoldActive&&!pairingTriggered){pairingHoldActive=true;pairingHoldStarted=ms;}
     if(pairingHoldActive&&ms-pairingHoldStarted>=10000){pairingHoldActive=false;pairingTriggered=true;apCloseAt=0;showJoinQr=true;startPortal();}
   } else {pairingHoldActive=false;if(!chord)pairingTriggered=false;}
-  if(events&8)stopRing(false);else if(events&1)setScreenAwake(false);else if((events&4)&&!chord){if(portal)showJoinQr=!showJoinQr;}
+  if(events&8)stopRing(false);else if(events&1)setScreenAwake(false);else if((events&2)&&!chord&&!portal){updateInfoPage=!updateInfoPage;forceDraw=true;}else if((events&4)&&!chord){if(portal)showJoinQr=!showJoinQr;}
   if(clockValid()) {
     const int64_t corrected=alarmclock::reconcileHandled(now,handled);
     if(corrected!=handled){handled=corrected;prefs.putLong64("handled",handled);}
@@ -708,10 +744,8 @@ void loop() {
   if(!pairingHoldActive&&ms-lastPoll>=POLL_MS){lastPoll=ms;pollBackend();}
   // Main alone mutates schedules/snooze and selects the next boot image.
   // UI/backend changes above precede the fresh activation guard.
-  alarm_ota_handle_t activation=otaActivation.exchange(0);
-  if(activation){refreshOtaGuard();if(alarm_ota_activate(activation,&otaSession)!=ESP_OK){
-    alarm_ota_abort(activation,&otaSession);otaPowerConfirmed=false;otaBusy=false;
-    otaStateSet("error","activation-guard","目前不適合重啟，保留原有版本");}}
+  bool activation=otaActivation.exchange(false);
+  if(activation){refreshOtaGuard();esp_err_t result=alarm_ota_activate(&otaSession);if(result!=ESP_OK){otaBusy=false;alarm_ota_status_t status={};alarm_ota_get_status(&status);if(status.state==ALARM_OTA_IDLE)otaResetTerminalNoStaged();const bool guardBlocked=result==ALARM_OTA_ERR_CHARGING_REQUIRED||result==ALARM_OTA_ERR_UNSAFE;otaStateSet("error",status.marker_fault?"marker-fault":result==ALARM_OTA_ERR_CHARGING_REQUIRED?"charging-required":guardBlocked?"guard-rejected":"activation-failed",status.marker_fault?"更新記錄狀態不明，操作維持封鎖":result==ALARM_OTA_ERR_CHARGING_REQUIRED?"裝置未顯示充電，保留已下載更新":guardBlocked?"本機安全條件已改變，保留已下載更新":"本機驗證或啟動選擇失敗；請重新下載");}}
   if(ms-lastDraw>=200){lastDraw=ms;draw();}
   if(ms-lastSerial>=10000){lastSerial=ms;Serial.printf("STATUS setup=%d wifi=%d clock=%d alarms=%u ringing=%d\n",portal,WiFi.isConnected(),clockValid(),unsigned(alarms.size()),ringing);}
   delay(10);

@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
+_Static_assert(sizeof(alarm_ota_staged_record_t) <= 320, "staged marker must remain bounded");
+
 static bool bounded(const char *s, size_t cap, size_t *length) {
     if (!s || !cap) return false;
     for (size_t i = 0; i < cap; ++i) {
@@ -96,13 +98,54 @@ size_t alarm_ota_manifest_canonical(const alarm_ota_manifest_t *m, char *out, si
 alarm_ota_policy_result_t alarm_ota_check_guard(const alarm_ota_guard_t *g, uint32_t window) {
     if (!g || !g->clock_valid || !g->schedule_ready || g->now_epoch < 1704067200)
         return ALARM_OTA_POLICY_CLOCK_UNTRUSTED;
-    if (!g->operator_confirmed_power) return ALARM_OTA_POLICY_POWER_UNSAFE;
+    if (!g->charging_valid || !g->charging) return ALARM_OTA_POLICY_CHARGING_REQUIRED;
     if (g->ringing || g->snoozed) return ALARM_OTA_POLICY_ALARM_ACTIVE;
     if (g->next_alarm_epoch < 0) return ALARM_OTA_POLICY_CLOCK_UNTRUSTED;
     if (g->next_alarm_epoch && (g->next_alarm_epoch <= g->now_epoch ||
         (uint64_t)(g->next_alarm_epoch - g->now_epoch) <= window))
         return ALARM_OTA_POLICY_ALARM_NEAR;
     return ALARM_OTA_POLICY_OK;
+}
+
+bool alarm_ota_staged_record_shape_valid(const alarm_ota_staged_record_t *r) {
+    uint8_t digest[32];
+    if (!r || r->schema != ALARM_OTA_STAGED_SCHEMA ||
+        r->target_subtype < 16 || r->target_subtype >= 32 ||
+        r->target_address == 0 || (r->target_address & 0xfff) != 0 ||
+        !alarm_ota_decode_digest(r->manifest.hmac_sha256, digest) ||
+        !alarm_ota_decode_digest(r->record_hmac_sha256, digest)) return false;
+    char canonical[ALARM_OTA_CANONICAL_CAP];
+    return alarm_ota_manifest_canonical(&r->manifest, canonical, sizeof(canonical)) != 0;
+}
+
+size_t alarm_ota_staged_canonical(const alarm_ota_staged_record_t *r, char *out, size_t capacity) {
+    if (!r || !out || r->schema != ALARM_OTA_STAGED_SCHEMA) return 0;
+    char manifest[ALARM_OTA_CANONICAL_CAP];
+    size_t manifest_n = alarm_ota_manifest_canonical(&r->manifest, manifest, sizeof(manifest));
+    uint8_t digest[32];
+    if (!manifest_n || !alarm_ota_decode_digest(r->manifest.hmac_sha256, digest) ||
+        r->target_subtype < 16 || r->target_subtype >= 32 ||
+        !r->target_address || (r->target_address & 0xfff)) return 0;
+    int n = snprintf(out, capacity, "%u\n%.*s%s\n%u\n%lu\n",
+                     (unsigned)r->schema, (int)manifest_n, manifest,
+                     r->manifest.hmac_sha256, (unsigned)r->target_subtype,
+                     (unsigned long)r->target_address);
+    return n > 0 && (size_t)n < capacity ? (size_t)n : 0;
+}
+
+alarm_ota_activation_result_t alarm_ota_run_activation(
+    const alarm_ota_staged_record_t *record, const alarm_ota_activation_ops_t *ops, void *context) {
+    if (!alarm_ota_staged_record_shape_valid(record) || !ops || !ops->authenticate ||
+        !ops->target_valid || !ops->image_valid || !ops->guard_valid ||
+        !ops->clear_marker || !ops->select_boot || !ops->authenticate(context, record))
+        return ALARM_OTA_ACTIVATION_BAD_RECORD;
+    if (!ops->guard_valid(context)) return ALARM_OTA_ACTIVATION_CHARGING_REQUIRED;
+    if (!ops->target_valid(context, record)) return ALARM_OTA_ACTIVATION_TARGET_INVALID;
+    if (!ops->image_valid(context, record)) return ALARM_OTA_ACTIVATION_IMAGE_INVALID;
+    if (!ops->guard_valid(context)) return ALARM_OTA_ACTIVATION_CHARGING_REQUIRED;
+    if (!ops->clear_marker(context)) return ALARM_OTA_ACTIVATION_CLEAR_FAILED;
+    if (!ops->select_boot(context)) return ALARM_OTA_ACTIVATION_BOOT_FAILED;
+    return ALARM_OTA_ACTIVATION_OK;
 }
 
 bool alarm_ota_chunk_fits(uint32_t received, size_t length, uint32_t expected) {

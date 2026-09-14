@@ -7,14 +7,14 @@
 - GitHub：`git@github.com:chuangkevin/shift-alarm.git`，預設分支 `main`。
 - 實機韌體：0.3.8。已用 USB 僅寫入非執行中的 app0 與單一 OTA 選擇 sector；重開後 Wi-Fi、Tailscale、方向、關屏、亮度、班表與鬧鐘均保留；目前為 90°、5 分鐘關屏、25% 亮度。
 - 後端：0.1.2，部署於 `rpi-matrix:/home/kevin/DockerCompose/shift-alarm`，只提供辨識、心跳與私有韌體。Gemini `max_tokens` 預設 6000、強制下限 400。
-- 待驗證原始碼：韌體 0.3.9、後端／映像 0.1.3，尚未部署。包含電池狀態、離線頁、Tailnet 啟動重試、後端可達性與 OTA reconnect 診斷。
+- 待驗證原始碼：韌體 0.3.10、後端／映像 0.1.3，尚未部署。包含兩階段 staged OTA、GPIO38 fail-closed 充電 gate、離線安裝、更新資訊頁與既有 0.3.9 裝置可靠性功能。
 - 目前韌體原始碼：`firmware-next/`，ESP-IDF 5.3.2 / Arduino 3.1.3。
 - `firmware/` 是歷史版本，只供追查，不是更新來源。
 - 裝置後端固定為 Tailscale 位址 `100.126.226.79:8237`。裝置自己的 Tailscale IP 可能因重新授權而改變，部署前必須讀取當下狀態，不可只抄舊紀錄。
 
 0.3.8 的已驗收功能包括：首次 QR 配網、換 Wi-Fi、port 80 本機月曆與時／分選擇器、圖片辨識草稿、每三小時校時與手動校時、四方向旋轉、持久關屏時間／亮度與永久開啟、任一鍵喚醒／停鈴、鬧鐘強制亮屏、跨月「連續上班只通知第一天」、後續日期外框、每筆時間獨立開關、持續心跳，以及依臺北時間標示今天的紅點與細紅框。今天標記每分鐘原地更新，不重建日期按鈕。OTA 最多三次 Range 續傳已通過 host 測試，尚待下一次實機 OTA 驗收。
 
-0.3.9 使用 ADC2 channel 6 的 oneshot 取樣；GPIO38 依 pinned upstream 定義為 active-high 充電輸入。硬體 ADC、實際充電訊號、實體 UI、真實 Range reconnect 及線上入口的離線 fallback 尚未驗證；不可把 code／host 測試寫成實機完成。
+0.3.10 使用 GPIO38 當下 active-high 充電狀態作為下載與安裝硬 gate。它不是可靠的 USB／VBUS 偵測；充滿電時即使 USB 仍連接，也可能顯示未充電並拒絕操作。硬體 GPIO38、完整映像跨重開、離線安裝、實體 240×240 UI 與 live OTA 尚未驗證；不可把 code／host 測試寫成實機完成。
 
 ## 接手後立即執行
 
@@ -41,6 +41,7 @@ fi
 .venv312/bin/python -m pytest -q
 .venv312/bin/python -m unittest discover -s deploy/tests -v
 sh firmware-next/components/alarm_ota/tests/run_host_tests.sh
+python3 firmware-next/components/alarm_ota/tests/test_manifest_contract.py
 node --check static/app.js
 ```
 

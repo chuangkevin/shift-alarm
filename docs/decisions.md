@@ -18,4 +18,9 @@
 - 韌體 0.3.9／後端 0.1.3 原始碼：電池採 ADC2 channel 6 oneshot，前三個有效樣本每秒取樣，之後每 60 秒取樣並以最近三個有效值過濾；讀取失敗不重試，最後有效值超過 300 秒才改為未知。GPIO38 依 pinned upstream 採 active-high，只影響充電狀態，不使百分比失效。
 - 心跳的電池物件維持 optional；有效電量以伺服器收到時間減去最多 300 秒的樣本年齡形成觀測時間。未知心跳只更新目前狀態，不刪除最後有效快照。
 - Tailnet 控制面與後端可達性分開顯示。啟動配置／配置失敗自動限界退避重試；OTA POST 不重送，Range reconnect handshake 每次最多三次退避嘗試。
-- 0.3.9／0.1.3 尚未部署。ADC、GPIO38 極性、實體 TFT、真實 Range reconnect 與線上離線 fallback 均保留為未驗證，不以 code 或 host 測試代替。
+- 韌體 0.3.10：OTA 分成 `下載更新`、`安裝並重新啟動`、`刪除已下載更新`。下載與安裝都只接受 GPIO38 當下有效且 active-high 的充電狀態，不提供人工 override。GPIO38 不是可靠 VBUS 偵測；充滿時即使 USB 已接上也可 fail-closed 拒絕。
+- 完整映像經 exact size、stream SHA、`esp_ota_end` 與 descriptor 驗證後，才把單一 bounded authenticated marker 存入既有 `alarm_nvs`。部分映像不留 marker；重開後從 byte 0 重新下載。同次開機保留 Range reconnect。
+- 安裝不依賴後端或網路；它重新驗 manifest/marker HMAC、從 partition table 推導 inactive slot、重讀整片 flash SHA/descriptor、重跑 local guards，清 marker 成功後才切 boot。boot selection 失敗時保留目前版本並要求重新下載。
+- marker I/O 結果不明時進入 fail-closed `marker-fault`。它不等同「沒有更新」：不得下載覆寫 target，也不得假設可安裝。GET／boot observation 只 load/validate，絕不 clear/store 或改 flash；可無寫入恢復 authenticated staged record或 confirmed absence。corrupt/incompatible marker 必須由明確 discard 清理，且 clear 後再次 load 確認不存在才回 idle。
+- 實體 240×240 畫面以非響鈴狀態短按「－」切換 `檢查更新` 資訊頁；只顯示版本、staged 狀態、充電 readiness 與 `/update` QR，不從實體鍵下載或安裝。響鈴任意鍵停鈴、BOOT 關屏、任意鍵喚醒及「＋」「－」十秒配網不變。
+- 0.3.10／0.1.3 尚未部署。GPIO38、實體 240×240 UI、persisted staged image、離線安裝與 live OTA 均保留為未驗證，不以 code 或 host 測試代替。

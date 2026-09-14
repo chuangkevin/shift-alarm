@@ -25,6 +25,6 @@
 
 - 永遠不要提交或輸出 `.env`、`provisioning.h`、`DEVICE_TOKEN` 真值、New API 金鑰、Wi-Fi 密碼、Tailscale 節點狀態／私鑰、SSH 私鑰、Flash/NVS 備份、SQLite 使用者資料或帶憑證的 `.bin`。
 - `firmware-next/` 是目前韌體；`firmware/` 是舊 PlatformIO 實作，不得拿來產生新版 OTA。
-- 一般更新只能發布應用程式 `.bin`，先做 Tailscale OTA 唯讀預檢，再由操作者確認穩定供電後送出一次安裝請求。不得自動重送 POST、改用區網後端、執行 `erase-flash`，或盲寫 bootloader、partition table、NVS、OTA 選擇區。
+- 一般更新只能發布應用程式 `.bin`。先做 Tailscale OTA 唯讀預檢，再分開送出一次下載與一次安裝；不得自動串接或重送 mutation POST。下載與安裝都必須由 GPIO38 當下 active-high 顯示充電，沒有人工 override；它不是可靠 VBUS 偵測，充滿時即使 USB 已接上仍可拒絕。不得改用區網後端、執行 `erase-flash`，或盲寫 bootloader、partition table、NVS、OTA 選擇區。
 - 只有使用者已要求部署或推送時才執行對應動作。部署後驗證版本、回連、設定保存、校時、畫面、按鍵與測試鬧鐘；通過後再更新文件與推送。
 - 公開 CI 必須在沒有私人憑證的環境可執行。裝置專用建置及發布檔一律留在私有環境。

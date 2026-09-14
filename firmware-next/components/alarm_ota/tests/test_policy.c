@@ -32,7 +32,7 @@ int main(void) {
     char canonical[ALARM_OTA_CANONICAL_CAP];size_t n=alarm_ota_manifest_canonical(&m,canonical,sizeof(canonical));
     assert(n==strlen(canonical));assert(strstr(canonical,"\n1.2.3\n1024\n")!=NULL);assert(canonical[n-1]=='\n');
     char small[8];assert(alarm_ota_manifest_canonical(&m,small,sizeof(small))==0);
-    alarm_ota_guard_t g={.clock_valid=true,.schedule_ready=true,.operator_confirmed_power=true,.now_epoch=1800000000};
+    alarm_ota_guard_t g={.clock_valid=true,.schedule_ready=true,.charging_valid=true,.charging=true,.now_epoch=1800000000};
     assert(alarm_ota_check_guard(&g,300)==ALARM_OTA_POLICY_OK);
     g.next_alarm_epoch=g.now_epoch+301;assert(alarm_ota_check_guard(&g,300)==ALARM_OTA_POLICY_OK);
     g.next_alarm_epoch--;assert(alarm_ota_check_guard(&g,300)==ALARM_OTA_POLICY_ALARM_NEAR);
@@ -44,7 +44,18 @@ int main(void) {
     g.ringing=false;g.snoozed=true;assert(alarm_ota_check_guard(&g,300)==ALARM_OTA_POLICY_ALARM_ACTIVE);
     g.snoozed=false;g.clock_valid=false;assert(alarm_ota_check_guard(&g,300)==ALARM_OTA_POLICY_CLOCK_UNTRUSTED);
     g.clock_valid=true;g.schedule_ready=false;assert(alarm_ota_check_guard(&g,300)==ALARM_OTA_POLICY_CLOCK_UNTRUSTED);
-    g.schedule_ready=true;g.operator_confirmed_power=false;assert(alarm_ota_check_guard(&g,300)==ALARM_OTA_POLICY_POWER_UNSAFE);
+    g.schedule_ready=true;g.charging=false;assert(alarm_ota_check_guard(&g,300)==ALARM_OTA_POLICY_CHARGING_REQUIRED);
+    g.charging=true;g.charging_valid=false;assert(alarm_ota_check_guard(&g,300)==ALARM_OTA_POLICY_CHARGING_REQUIRED);
+    alarm_ota_staged_record_t staged={.schema=ALARM_OTA_STAGED_SCHEMA,.manifest=good(),.target_subtype=17,.target_address=0x410000};
+    memset(staged.record_hmac_sha256,'c',64);
+    char staged_canonical[ALARM_OTA_STAGED_CANONICAL_CAP];
+    size_t staged_n=alarm_ota_staged_canonical(&staged,staged_canonical,sizeof(staged_canonical));
+    assert(staged_n==strlen(staged_canonical));
+    assert(strstr(staged_canonical,"1\nxingzhi-cube-1.54tft-wifi\n1.2.3\n1024\n")!=NULL);
+    assert(strstr(staged_canonical,"\n17\n4259840\n")!=NULL);
+    assert(alarm_ota_staged_record_shape_valid(&staged));
+    staged.schema++;assert(!alarm_ota_staged_record_shape_valid(&staged));staged.schema=ALARM_OTA_STAGED_SCHEMA;
+    staged.target_address++;assert(!alarm_ota_staged_record_shape_valid(&staged));
     assert(alarm_ota_chunk_fits(0,1024,1024));assert(alarm_ota_chunk_fits(1000,24,1024));
     assert(!alarm_ota_chunk_fits(1024,1,1024));assert(!alarm_ota_chunk_fits(0,0,1024));
     assert(!alarm_ota_chunk_fits(1025,1,1024));assert(!alarm_ota_chunk_fits(UINT32_MAX,SIZE_MAX,UINT32_MAX));
