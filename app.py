@@ -24,12 +24,12 @@ import httpx
 import qrcode
 import qrcode.image.svg
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError, model_validator
 
-VERSION = '0.1.2'
+VERSION = '0.1.3'
 TZ = ZoneInfo('Asia/Taipei')
 DATA = Path(os.environ.get('ALARM_DATA', './data'))
 DATA.mkdir(parents=True, exist_ok=True)
@@ -56,6 +56,26 @@ app = FastAPI(title='班表鬧鐘', version=VERSION, docs_url=None, redoc_url=No
 import_lock = asyncio.Lock()
 RECOGNITION_SECONDS = 45
 recognition_log = logging.getLogger("uvicorn.error")
+OFFLINE_STYLE = (
+    ':root{font-family:-apple-system,BlinkMacSystemFont,"Noto Sans TC",sans-serif;'
+    'color:#173046;background:#f5f4ef}'
+    '*{box-sizing:border-box}body{margin:0;padding:28px 18px;line-height:1.65}'
+    'main{max-width:620px;margin:auto}'
+    'section{background:#fff;border:1px solid #dce3de;border-radius:20px;padding:24px;margin:18px 0}'
+    'h1{font-size:28px;margin:0}.warning{border-left:5px solid #b83a32}'
+    'dl{display:grid;grid-template-columns:max-content 1fr;gap:10px 16px}'
+    'dt{font-weight:700}dd{margin:0}'
+    '@media(max-width:600px){dl{grid-template-columns:1fr;gap:2px}dd{margin-bottom:12px}}'
+)
+OFFLINE_STYLE_SHA256 = base64.b64encode(
+    hashlib.sha256(OFFLINE_STYLE.encode()).digest()
+).decode()
+DEFAULT_CSP = "default-src 'self'; img-src 'self' blob: data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+OFFLINE_CSP = (
+    "default-src 'none'; "
+    f"style-src 'sha256-{OFFLINE_STYLE_SHA256}'; "
+    "script-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+)
 
 @contextmanager
 def database():
@@ -109,7 +129,11 @@ async def private_boundary(request: Request, call_next):
     response.headers['Cache-Control'] = 'no-store' if path.startswith('/api/') else 'no-cache'
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer'
-    response.headers['Content-Security-Policy'] = "default-src 'self'; img-src 'self' blob: data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+    if path == '/device-offline':
+        response.headers['Content-Security-Policy'] = OFFLINE_CSP
+        response.headers['X-Shift-Alarm-Offline'] = 'true'
+    else:
+        response.headers['Content-Security-Policy'] = DEFAULT_CSP
     return response
 
 class Day(BaseModel):
@@ -130,12 +154,34 @@ class Settings(BaseModel):
     times: list[str] = Field(max_length=4)
     enabled: bool
 
+class Battery(BaseModel):
+    model_config = ConfigDict(extra='forbid', serialize_by_alias=True)
+    schema_version: StrictInt = Field(alias='schema')
+    valid: StrictBool
+    percent: StrictInt | None
+    charging: StrictBool | None
+    sample_age_seconds: StrictInt | None
+
+    @model_validator(mode='after')
+    def combinations(self):
+        if self.schema_version != 1:
+            raise ValueError('不支援的電量格式版本')
+        if self.valid:
+            if self.percent is None or not 0 <= self.percent <= 100:
+                raise ValueError('有效電量百分比必須為 0 到 100')
+            if self.sample_age_seconds is None or not 0 <= self.sample_age_seconds <= 300:
+                raise ValueError('有效電量取樣時間必須為 0 到 300 秒')
+        elif self.percent is not None or self.sample_age_seconds is not None:
+            raise ValueError('未知電量不能包含百分比或取樣時間')
+        return self
+
 class Heartbeat(BaseModel):
-    model_config = ConfigDict(extra='ignore')
-    revision: str = Field(max_length=80)
-    status: str = Field(default='online', max_length=80)
-    next_alarm: int | None = None
-    ip: str | None = Field(default=None, max_length=80)
+    model_config = ConfigDict(extra='forbid', strict=True)
+    revision: StrictStr = Field(max_length=80)
+    status: Literal['ready', 'ringing', 'waiting_for_time'] = 'ready'
+    next_alarm: StrictInt | None = None
+    ip: StrictStr | None = Field(default=None, max_length=80)
+    battery: Battery | None = None
 
 def month_dates(month):
     if not re.fullmatch(r'20\d{2}-(0[1-9]|1[0-2])', month):
@@ -185,7 +231,8 @@ def state():
         return {'version': VERSION, 'timezone': str(TZ), 'settings': get(c, 'settings'),
                 'months': [json.loads(r[0]) for r in c.execute('SELECT data FROM months ORDER BY month')],
                 'next_alarm': next((a for a in alarms if a['epoch'] > now), None),
-                'device': get(c, 'device', {'last_seen': None, 'revision': None}),
+                'device': get(c, 'device', {'last_seen': None, 'revision': None, 'battery': None}),
+                'last_valid_battery': get(c, 'last_valid_battery'),
                 'revision': get(c, 'revision'), 'management_url': MANAGEMENT_URL, 'remote_url': REMOTE_URL,
                 'llm_ready': bool(NEWAPI_KEY), 'server_time': now}
 
@@ -284,8 +331,15 @@ def firmware_binary(digest: str):
 
 @app.post('/api/device/heartbeat')
 def heartbeat(body: Heartbeat):
+    received_at = int(time.time())
     with database() as c:
-        put(c, 'device', {**body.model_dump(), 'last_seen': int(time.time())})
+        current = body.model_dump(by_alias=True)
+        current['last_seen'] = received_at
+        put(c, 'device', current)
+        if body.battery and body.battery.valid:
+            battery = body.battery.model_dump(by_alias=True)
+            put(c, 'last_valid_battery', {**battery, 'received_at': received_at,
+                                         'observed_at': received_at - battery['sample_age_seconds']})
     return {'ok': True}
 
 @app.post('/api/device/stop')
@@ -415,6 +469,45 @@ def device_calendar_url():
     if address.version != 4 or not address.is_private:
         raise HTTPException(503, '裝置尚未回報有效的區網位址')
     return f'http://{address}/calendar'
+
+def relative_time(epoch: int | None, now: int) -> str:
+    if epoch is None:
+        return '尚無資料'
+    seconds = max(0, now - epoch)
+    if seconds < 60:
+        return f'{seconds} 秒前'
+    if seconds < 3600:
+        return f'{seconds // 60} 分鐘前'
+    if seconds < 86400:
+        return f'{seconds // 3600} 小時前'
+    return f'{seconds // 86400} 天前'
+
+def absolute_time(epoch: int | None) -> str:
+    if epoch is None:
+        return '尚無資料'
+    return datetime.fromtimestamp(epoch, TZ).strftime('%Y/%m/%d %H:%M:%S')
+
+@app.get('/device-offline', response_class=HTMLResponse)
+@app.head('/device-offline', response_class=HTMLResponse)
+def device_offline():
+    now = int(time.time())
+    with database() as c:
+        device = get(c, 'device', {})
+        battery = get(c, 'last_valid_battery')
+    last_seen = device.get('last_seen')
+    battery_time = battery.get('observed_at') if battery else None
+    battery_text = f"{battery['percent']}%" if battery else '尚無有效資料'
+    charging = '，充電中' if battery and battery.get('charging') is True else \
+        '，未充電' if battery and battery.get('charging') is False else ''
+    html = f'''<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="15">
+<title>裝置離線｜班表鬧鐘</title><style>{OFFLINE_STYLE}</style></head><body><main><p>班表鬧鐘</p><h1>裝置目前離線</h1>
+<section class="warning"><strong>非即時資料</strong><p>此頁只顯示伺服器最後收到的狀態，將每 15 秒自動重試。</p></section>
+<section><dl><dt>裝置最後連線</dt><dd>{absolute_time(last_seen)}（{relative_time(last_seen, now)}）</dd>
+<dt>最後有效電量</dt><dd>{battery_text}{charging}</dd>
+<dt>電量觀測時間</dt><dd>{absolute_time(battery_time)}（{relative_time(battery_time, now)}）</dd>
+<dt>後端版本</dt><dd>{VERSION}</dd></dl></section></main></body></html>'''
+    return HTMLResponse(html)
 
 @app.get('/')
 @app.get('/calendar')

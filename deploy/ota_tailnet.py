@@ -81,8 +81,9 @@ def preflight(client, device, backend, token, expected):
     if client.get(device + '/api/health').get('ok') is not True:
         raise ValueError('Backend health probe failed')
     update = client.get(device + '/api/update', headers)
-    if update.get('ready') is not True or update.get('busy') is not False:
-        raise ValueError('OTA is unavailable or busy')
+    if update.get('canStart') is not True:
+        reason = update.get('reason') if isinstance(update.get('reason'), str) else 'unknown'
+        raise ValueError('OTA preflight blocked: ' + reason)
     if status.get('clockReady') is not True or status.get('ringing') is not False:
         raise ValueError('Clock or alarm guard not ready')
     manifest = verify_manifest(client.get(backend + '/api/device/update',

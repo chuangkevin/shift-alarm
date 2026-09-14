@@ -4,7 +4,7 @@
 
 ESP32-S3 星智 CUBE 1.54 吋獨立鬧鐘。班表與響鈴設定保存在裝置；手機在裝置網頁編輯月曆，也可經裝置的原生 Tailscale 上傳圖片至私有辨識服務。
 
-新版韌體位於 `firmware-next/`。實機目前為 0.3.8，已驗收連續上班只通知第一天、每個響鈴時間獨立開關、持續心跳、16 KiB loop task 堆疊修正、10%～100% 的持久亮度設定，以及依臺北時間標示今天的紅點與細紅框；目前亮度為 25%。OTA 斷線續傳已通過 host 測試，仍須在下一次實機 OTA 驗收。後端 0.1.2 已部署。
+新版韌體位於 `firmware-next/`。原始碼版本為 0.3.9，後端／映像版本為 0.1.3；尚未部署。實機仍為 0.3.8，後端仍為 0.1.2。0.3.9 加入電池取樣、螢幕與裝置網頁電量狀態、離線唯讀頁、後端可達性、Tailnet 啟動重試與 OTA 診斷。程式與 host 測試不能取代實機驗收；ADC 數值、240×240 實體排版、真實 HTTP Range 續傳與線上入口離線 fallback 均待後續驗證。
 
 0.2.8 已實測手機經 ESP32 與原生 Tailscale 上傳九月班表，36.851 秒辨識出正確 11 天。升至 0.3.1 後，Wi-Fi、90 度方向、11 筆鬧鐘與班表 revision 均保留。0.2.9 的首次 OTA 下載中止且保留原版本；0.3.0 起已加入十分鐘總期限、三十秒無進度保護與進度回報。0.3.2 已從 0.3.1 經原生 Tailscale 完整 OTA，下載、驗證、重開、回連與保存資料檢查均通過。
 
@@ -52,6 +52,10 @@ Python 3.12 / FastAPI，部署在 `rpi-matrix:/home/kevin/DockerCompose/shift-al
 | `ALLOWED_HOSTS` | 允許的 HTTP Host |
 
 後端根路徑會轉到裝置 `/calendar`，不再提供第二套班表介面；以裝置保存結果為準。備份 SQLite 請使用 backup API，或停止服務後一併保存 DB／WAL 與圖片；不要只複製正在寫入的主資料庫檔。
+
+裝置心跳可選擇附帶 `battery`：`{schema:1, valid, percent, charging, sample_age_seconds}`。舊版不附電量仍可使用。後端的 `/device-offline` 只顯示最後連線與最後有效電量；未知電量心跳不會清除最後有效快照。
+
+Caddy 離線 fallback 必須晚於後端更新。部署前由 Caddy 主機確認後端 `HEAD /device-offline` 回應 `200`、空 body 與離線頁專用 CSP；只有 `/api/health` 成功不足以證明 fallback 頁可用。
 
 ## 開發、首次燒錄與 OTA
 

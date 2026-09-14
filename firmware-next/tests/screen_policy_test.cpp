@@ -12,6 +12,7 @@ int main() {
   assert(screenpolicy::brightnessDuty(40) == 102);
   assert(screenpolicy::brightnessDuty(100) == 255);
   using screenpolicy::shouldTurnOff;
+  using screenpolicy::settingsLoadValid;
   using screenpolicy::validTimeout;
 
   assert(validTimeout(0));
@@ -19,6 +20,11 @@ int main() {
   assert(validTimeout(60));
   assert(!validTimeout(2));
   assert(!validTimeout(65535));
+
+  assert(settingsLoadValid(true, false, false));
+  assert(settingsLoadValid(true, true, true));
+  assert(!settingsLoadValid(true, true, false));
+  assert(!settingsLoadValid(false, false, true));
 
   assert(!shouldTurnOff(0, 900000, 0, false));
   assert(!shouldTurnOff(1, 59999, 0, false));

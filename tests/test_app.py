@@ -63,14 +63,116 @@ def test_revision_heartbeat_and_single_test_alarm():
     before = client.get('/api/state').json()['revision']
     client.post('/api/months', json=month(), headers=UI)
     assert client.get('/api/state').json()['revision'] != before
-    client.post('/api/device/heartbeat', json={'revision': 'abc', 'status': 'online'}, headers=DEV)
+    client.post('/api/device/heartbeat', json={'revision': 'abc', 'status': 'ready'}, headers=DEV)
     assert client.get('/api/state').json()['device']['revision'] == 'abc'
     client.post('/api/test-alarm', headers=UI)
     client.post('/api/test-alarm', headers=UI)
     assert len(client.get('/api/device/schedule', headers=DEV).json()['alarms']) == 1
 
+def test_heartbeat_battery_contract_and_old_device_compatibility(monkeypatch):
+    monkeypatch.setattr(app.time, 'time', lambda: 2_000_000_000)
+    old = {'revision': 'old', 'status': 'ready'}
+    assert client.post('/api/device/heartbeat', json=old, headers=DEV).status_code == 200
+    assert client.get('/api/state').json()['device']['battery'] is None
+    for percent in (0, 100):
+        battery = {'schema': 1, 'valid': True, 'percent': percent, 'charging': False,
+                   'sample_age_seconds': 300}
+        assert client.post('/api/device/heartbeat', json={**old, 'battery': battery}, headers=DEV).status_code == 200
+        state = client.get('/api/state').json()
+        assert state['device']['battery'] == battery
+        assert state['last_valid_battery'] == {**battery, 'received_at': 2_000_000_000,
+                                               'observed_at': 1_999_999_700}
+
+def test_unknown_battery_preserves_last_valid_snapshot(monkeypatch):
+    now = [2_000_000_000]
+    monkeypatch.setattr(app.time, 'time', lambda: now[0])
+    valid = {'schema': 1, 'valid': True, 'percent': 57, 'charging': True,
+             'sample_age_seconds': 5}
+    client.post('/api/device/heartbeat', json={'revision': 'a', 'battery': valid}, headers=DEV)
+    now[0] += 30
+    unknown = {'schema': 1, 'valid': False, 'percent': None, 'charging': None,
+               'sample_age_seconds': None}
+    assert client.post('/api/device/heartbeat', json={'revision': 'b', 'battery': unknown}, headers=DEV).status_code == 200
+    state = client.get('/api/state').json()
+    assert state['device']['battery'] == unknown
+    assert state['last_valid_battery']['percent'] == 57
+    assert state['last_valid_battery']['received_at'] == 2_000_000_000
+    assert state['last_valid_battery']['observed_at'] == 1_999_999_995
+
+@pytest.mark.parametrize('battery', [
+    {'schema': 1, 'valid': True, 'percent': True, 'charging': False, 'sample_age_seconds': 0},
+    {'schema': 1, 'valid': True, 'percent': 50, 'charging': 1, 'sample_age_seconds': 0},
+    {'schema': 1, 'valid': True, 'percent': 50, 'charging': False, 'sample_age_seconds': True},
+    {'schema': 1, 'valid': True, 'percent': -1, 'charging': False, 'sample_age_seconds': 0},
+    {'schema': 1, 'valid': True, 'percent': 101, 'charging': False, 'sample_age_seconds': 0},
+    {'schema': 1, 'valid': True, 'percent': 50, 'charging': False, 'sample_age_seconds': 301},
+    {'schema': 1, 'valid': True, 'percent': None, 'charging': False, 'sample_age_seconds': 0},
+    {'schema': 1, 'valid': False, 'percent': 50, 'charging': None, 'sample_age_seconds': None},
+    {'schema': 1, 'valid': False, 'percent': None, 'charging': None, 'sample_age_seconds': 0},
+    {'schema': 2, 'valid': False, 'percent': None, 'charging': None, 'sample_age_seconds': None},
+    {'schema': True, 'valid': False, 'percent': None, 'charging': None, 'sample_age_seconds': None},
+    {'schema': 1, 'valid': False, 'percent': None, 'charging': None, 'sample_age_seconds': None, 'extra': 1},
+])
+def test_heartbeat_rejects_invalid_battery_contract(battery):
+    response = client.post('/api/device/heartbeat', json={'revision': 'a', 'battery': battery}, headers=DEV)
+    assert response.status_code == 422
+
+@pytest.mark.parametrize('payload', [
+    {'revision': 'old', 'status': 'ready', 'unknown': 1},
+    {'revision': 'old', 'status': 'online'},
+    {'revision': 'old', 'status': 'ready', 'next_alarm': True},
+    {'revision': 7, 'status': 'ready'},
+    {'revision': 'old', 'status': 'ready', 'ip': 1234},
+])
+def test_heartbeat_rejects_invalid_outer_envelope(payload):
+    assert client.post('/api/device/heartbeat', json=payload, headers=DEV).status_code == 422
+
+def test_offline_page_is_read_only_safe_and_supports_head(monkeypatch):
+    monkeypatch.setattr(app.time, 'time', lambda: 2_000_000_100)
+    battery = {'schema': 1, 'valid': True, 'percent': 20, 'charging': True,
+               'sample_age_seconds': 10}
+    client.post('/api/device/heartbeat', json={'revision': 'a', 'battery': battery}, headers=DEV)
+    response = client.get('/device-offline')
+    assert response.status_code == 200
+    assert '裝置目前離線' in response.text
+    assert '20%' in response.text and '充電中' in response.text
+    assert app.VERSION in response.text and '非即時資料' in response.text
+    assert '2,000,000,100' not in response.text
+    for forbidden in ('nonce', 'token', '100.126.', 'Traceback', '<form', '<button'):
+        assert forbidden not in response.text
+    head = client.head('/device-offline')
+    assert head.status_code == 200 and head.content == b''
+
+def test_offline_page_csp_allows_only_its_hashed_style():
+    import base64
+    import hashlib
+    expected = (
+        "default-src 'none'; "
+        f"style-src 'sha256-{app.OFFLINE_STYLE_SHA256}'; "
+        "script-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+    )
+    response = client.get('/device-offline')
+    assert response.headers['content-security-policy'] == expected
+    style = response.text.split('<style>', 1)[1].split('</style>', 1)[0]
+    actual_hash = base64.b64encode(hashlib.sha256(style.encode()).digest()).decode()
+    assert response.text.count('<style>') == 1
+    assert actual_hash == app.OFFLINE_STYLE_SHA256
+    assert '<script' not in response.text
+    assert "'unsafe-inline'" not in expected
+    assert "script-src 'self'" not in expected
+    assert client.head('/device-offline').headers['content-security-policy'] == expected
+    assert client.get('/api/health').headers['content-security-policy'] == (
+        "default-src 'self'; img-src 'self' blob: data:; style-src 'self'; "
+        "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+    )
+
+def test_offline_readiness_marker_is_path_and_method_specific():
+    assert client.get('/device-offline').headers['x-shift-alarm-offline'] == 'true'
+    assert client.head('/device-offline').headers['x-shift-alarm-offline'] == 'true'
+    assert 'x-shift-alarm-offline' not in client.get('/api/health').headers
+
 def test_backend_root_redirects_to_device_calendar():
-    client.post('/api/device/heartbeat', json={'revision': 'abc', 'status': 'online', 'ip': '192.168.18.160'}, headers=DEV)
+    client.post('/api/device/heartbeat', json={'revision': 'abc', 'status': 'ready', 'ip': '192.168.18.160'}, headers=DEV)
     response = client.get('/', follow_redirects=False)
     assert response.status_code == 307
     assert response.headers['location'] == 'http://192.168.18.160/calendar'

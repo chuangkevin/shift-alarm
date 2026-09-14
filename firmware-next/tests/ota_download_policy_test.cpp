@@ -18,4 +18,8 @@ int main() {
     assert(mayReconnect(0));
     assert(mayReconnect(2));
     assert(!mayReconnect(3));
+    assert(max_handshake_attempts == 3);
+    assert(handshakeBackoffMs(0) == 250);
+    assert(handshakeBackoffMs(1) == 500);
+    assert(handshakeBackoffMs(2) == 1000);
 }

@@ -25,7 +25,7 @@ class Fake:
         if url.endswith('/api/tailnet'):
             return {'connected': True, 'acl_ready': True, 'ip': '100.90.212.116'}
         if url.endswith('/api/status'): return self.status
-        if url.endswith('/api/update'): return {'ready': True, 'busy': False}
+        if url.endswith('/api/update'): return {'ready': True, 'busy': False, 'canStart': True, 'reason': 'ready'}
         if url.endswith('/api/device/update'): return release()
         if url.endswith('/api/health'): return {'ok': True}
         raise AssertionError(url)
@@ -77,6 +77,14 @@ class Tests(unittest.TestCase):
         f = Fake()
         ota.preflight(f, 'http://100.90.212.116', 'http://100.126.226.79:8237', 'test-secret', '0.2.8')
         self.assertTrue(all(body is None for _, body in f.calls))
+    def test_preflight_uses_device_reason(self):
+        class Blocked(Fake):
+            def get(self, url, headers=None):
+                if url.endswith('/api/update'):
+                    return {'ready': True, 'busy': False, 'canStart': False, 'reason': 'alarm-near'}
+                return super().get(url, headers)
+        with self.assertRaisesRegex(ValueError, 'alarm-near'):
+            ota.preflight(Blocked(), 'http://100.90.212.116', 'http://100.126.226.79:8237', 'test-secret', '0.2.8')
     def test_lan_and_missing_transport_refused(self):
         for transport in ('lan', None):
             f = Fake(); f.status['backendTransport'] = transport

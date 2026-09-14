@@ -1,4 +1,5 @@
 #include "alarm_tailnet.h"
+#include "alarm_tailnet_retry.h"
 #include "microlink_internal.h"
 #include "nvs.h"
 #include "esp_random.h"
@@ -7,6 +8,9 @@
 /* Only this worker may access the client or persistent identity. HTTP/loop
  * callers enqueue commands and read a bounded cached status copy. */
 static microlink_t *client;
+static bool client_started;
+static bool reauth_rotation_pending;
+static uint8_t reauth_old_pub[32];
 static char hostname[64];
 static bool want_running;
 static esp_err_t last_error;
@@ -14,10 +18,15 @@ static alarm_tailnet_status_t snapshot;
 static portMUX_TYPE snapshot_lock=portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t commands;
 static int initialized;
+static int reauth_pending;
+static alarm_tailnet_lifecycle_t lifecycle;
+static uint8_t retry_count;
+static uint16_t retry_wait_cycles;
 typedef struct {enum {START,STOP,REAUTH} op;char name[64];} command_t;
 static void publish(void) {
-    alarm_tailnet_status_t next={.last_error=last_error,.peer_capacity=ML_POLICY_MAX_PEERS};
-    if(!client)next.state=want_running?ALARM_TAILNET_CONNECTING:ALARM_TAILNET_OFF;
+    alarm_tailnet_status_t next={.lifecycle=lifecycle,.retry_count=retry_count,
+        .retry_in_seconds=(uint16_t)((retry_wait_cycles+3)/4),.last_error=last_error,.peer_capacity=ML_POLICY_MAX_PEERS};
+    if(!client||!client_started)next.state=want_running?ALARM_TAILNET_CONNECTING:ALARM_TAILNET_OFF;
     else {
         xSemaphoreTake(client->security.lock,portMAX_DELAY);
         memcpy(next.auth_url,client->security.auth_url,sizeof(next.auth_url));
@@ -79,37 +88,41 @@ static void publish(void) {
         else next.state=ALARM_TAILNET_CONNECTING;
         xSemaphoreGive(client->security.lock);
     }
-    if(next.last_error!=ESP_OK)next.state=ALARM_TAILNET_BLOCKED;
+    if(next.last_error!=ESP_OK&&lifecycle==ALARM_TAILNET_LIFECYCLE_BLOCKED)next.state=ALARM_TAILNET_BLOCKED;
     taskENTER_CRITICAL(&snapshot_lock);snapshot=next;taskEXIT_CRITICAL(&snapshot_lock);
 }
 static esp_err_t stop_client(void) {
     if(!client)return ESP_OK;
+    client_started=false;
     ml_security_close(client);
     esp_err_t err=microlink_stop(client);
     if(err!=ESP_OK)return err; /* Preserve live context on timeout. */
-    microlink_destroy(client);client=NULL;return ESP_OK;
+    microlink_destroy(client);client=NULL;client_started=false;return ESP_OK;
 }
 static esp_err_t start_client(void) {
     if(client)return ESP_ERR_INVALID_STATE;
     microlink_config_t config={.device_name=hostname,.auth_key=NULL,.enable_derp=true,.max_peers=ML_MAX_PEERS};
     client=microlink_init(&config);if(!client)return ESP_FAIL;
     esp_err_t err=microlink_start(client);
-    if(err!=ESP_OK){esp_err_t stopped=stop_client();if(stopped!=ESP_OK)return stopped;}
+    if(err==ESP_OK){client_started=true;return ESP_OK;}
+    esp_err_t stopped=stop_client();
+    if(stopped!=ESP_OK)return stopped;
     return err;
 }
-static esp_err_t rotate_node(void) {
-    if(!client)return ESP_ERR_INVALID_STATE;
-    uint8_t old_pub[32],new_private[32];memcpy(old_pub,client->wg_public_key,32);
-    esp_err_t err=stop_client();if(err!=ESP_OK)return err;
+static esp_err_t persist_rotated_identity(void) {
+    if(!reauth_rotation_pending)return ESP_ERR_INVALID_STATE;
+    uint8_t new_private[32];
     esp_fill_random(new_private,sizeof(new_private));new_private[0]&=248;new_private[31]&=127;new_private[31]|=64;
-    nvs_handle_t nvs;err=nvs_open("microlink",NVS_READWRITE,&nvs);
+    nvs_handle_t nvs;esp_err_t err=nvs_open("microlink",NVS_READWRITE,&nvs);
     if(err==ESP_OK){
-        err=nvs_set_blob(nvs,"old_node_pub",old_pub,32);
+        err=nvs_set_blob(nvs,"old_node_pub",reauth_old_pub,32);
         if(err==ESP_OK)err=nvs_set_blob(nvs,"wg_private",new_private,32);
         if(err==ESP_OK)err=nvs_commit(nvs);
         nvs_close(nvs);
     }
     volatile uint8_t *wipe=new_private;for(unsigned i=0;i<32;i++)wipe[i]=0;
+    wipe=reauth_old_pub;for(unsigned i=0;i<32;i++)wipe[i]=0;
+    reauth_rotation_pending=false;
     return err;
 }
 static void worker(void *unused) {
@@ -120,24 +133,81 @@ static void worker(void *unused) {
             switch(command.op) {
             case START:
                 if(client)last_error=ESP_ERR_INVALID_STATE;
-                else {memcpy(hostname,command.name,sizeof(hostname));want_running=true;}
+                else {memcpy(hostname,command.name,sizeof(hostname));want_running=true;lifecycle=ALARM_TAILNET_QUEUED;retry_count=0;retry_wait_cycles=0;}
                 break;
             case STOP:
-                want_running=false;last_error=stop_client();break;
+                want_running=false;last_error=stop_client();lifecycle=ALARM_TAILNET_LIFECYCLE_OFF;retry_count=0;retry_wait_cycles=0;
+                reauth_rotation_pending=false;memset(reauth_old_pub,0,sizeof(reauth_old_pub));
+                __atomic_store_n(&reauth_pending,0,__ATOMIC_RELEASE);break;
             case REAUTH:
                 /* Long shutdown happens here, never in an HTTP request. */
                 taskENTER_CRITICAL(&snapshot_lock);
                 snapshot.state=ALARM_TAILNET_CONNECTING;snapshot.auth_url[0]=0;
                 taskEXIT_CRITICAL(&snapshot_lock);
-                if(client)last_error=rotate_node();
-                else last_error=hostname[0]?ESP_OK:ESP_ERR_INVALID_STATE;
-                /* A prior allocation/network startup failure must be retryable.
-                 * With no live client, reuse the existing NVS identity. */
-                want_running=last_error==ESP_OK;break;
+                retry_count=0;
+                retry_wait_cycles=0;
+                if(client&&client_started){
+                    memcpy(reauth_old_pub,client->wg_public_key,sizeof(reauth_old_pub));
+                    reauth_rotation_pending=true;
+                    want_running=true;
+                    last_error=stop_client();
+                    if(last_error==ESP_OK)last_error=persist_rotated_identity();
+                }else{
+                    last_error=ESP_ERR_INVALID_STATE;
+                }
+                if(last_error==ESP_OK){
+                    lifecycle=ALARM_TAILNET_QUEUED;
+                }else if(reauth_rotation_pending&&client){
+                    retry_count=1;
+                    retry_wait_cycles=alarm_tailnet_retry_seconds(retry_count)*4;
+                    lifecycle=ALARM_TAILNET_RETRY_WAIT;
+                }else{
+                    want_running=false;
+                    lifecycle=ALARM_TAILNET_LIFECYCLE_BLOCKED;
+                    __atomic_store_n(&reauth_pending,0,__ATOMIC_RELEASE);
+                }
+                break;
             }
         }
         /* SNTP may become ready after start was requested during AP/WiFi setup. */
-        if(want_running&&!client&&last_error==ESP_OK&&time(NULL)>=1700000000)last_error=start_client();
+        if(retry_wait_cycles)retry_wait_cycles--;
+        if(want_running&&!retry_wait_cycles&&time(NULL)>=1700000000&&client&&!client_started){
+            lifecycle=ALARM_TAILNET_STARTING;
+            publish();
+            last_error=stop_client();
+            if(last_error==ESP_OK){
+                if(reauth_rotation_pending)last_error=persist_rotated_identity();
+                if(last_error==ESP_OK){
+                    lifecycle=ALARM_TAILNET_QUEUED;
+                    retry_count=0;
+                }else{
+                    want_running=false;
+                    lifecycle=ALARM_TAILNET_LIFECYCLE_BLOCKED;
+                    __atomic_store_n(&reauth_pending,0,__ATOMIC_RELEASE);
+                }
+            }else{
+                if(retry_count<255){
+                    retry_count++;
+                }
+                retry_wait_cycles=alarm_tailnet_retry_seconds(retry_count)*4;
+                lifecycle=ALARM_TAILNET_RETRY_WAIT;
+            }
+        }else if(want_running&&!client&&!retry_wait_cycles&&time(NULL)>=1700000000){
+            lifecycle=ALARM_TAILNET_STARTING;publish();last_error=start_client();
+            if(last_error==ESP_OK){
+                lifecycle=ALARM_TAILNET_RUNNING;
+                retry_count=0;
+                __atomic_store_n(&reauth_pending,0,__ATOMIC_RELEASE);
+            }else{
+                if(retry_count<255){
+                    retry_count++;
+                }
+                retry_wait_cycles=alarm_tailnet_retry_seconds(retry_count)*4;
+                lifecycle=ALARM_TAILNET_RETRY_WAIT;
+            }
+        }else if(client&&client_started){
+            lifecycle=ALARM_TAILNET_RUNNING;
+        }
         publish();
     }
 }
@@ -155,7 +225,9 @@ esp_err_t alarm_tailnet_start(const char *name) {
     if(!name||!name[0]||strlen(name)>=sizeof(hostname))return ESP_ERR_INVALID_ARG;
     esp_err_t err=ensure_worker();if(err!=ESP_OK)return err;
     command_t cmd={.op=START};strcpy(cmd.name,name);
-    return xQueueSend(commands,&cmd,0)==pdTRUE?ESP_OK:ESP_ERR_TIMEOUT;
+    esp_err_t result=xQueueSend(commands,&cmd,0)==pdTRUE?ESP_OK:ESP_ERR_TIMEOUT;
+    if(result==ESP_OK){taskENTER_CRITICAL(&snapshot_lock);snapshot.state=ALARM_TAILNET_CONNECTING;snapshot.lifecycle=ALARM_TAILNET_QUEUED;taskEXIT_CRITICAL(&snapshot_lock);}
+    return result;
 }
 esp_err_t alarm_tailnet_get_status(alarm_tailnet_status_t *out) {
     if(!out)return ESP_ERR_INVALID_ARG;
@@ -163,7 +235,31 @@ esp_err_t alarm_tailnet_get_status(alarm_tailnet_status_t *out) {
 }
 esp_err_t alarm_tailnet_reauth(void) {
     if(__atomic_load_n(&initialized,__ATOMIC_ACQUIRE)!=2)return ESP_ERR_INVALID_STATE;
-    command_t cmd={.op=REAUTH};return xQueueSend(commands,&cmd,0)==pdTRUE?ESP_OK:ESP_ERR_TIMEOUT;
+    int expected=0;
+    if(!__atomic_compare_exchange_n(&reauth_pending,&expected,1,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
+        return ESP_ERR_INVALID_STATE;
+    }
+    taskENTER_CRITICAL(&snapshot_lock);
+    bool allowed=snapshot.lifecycle==ALARM_TAILNET_RUNNING;
+    if(allowed){
+        snapshot.state=ALARM_TAILNET_CONNECTING;
+        snapshot.lifecycle=ALARM_TAILNET_QUEUED;
+        snapshot.auth_url[0]=0;
+    }
+    taskEXIT_CRITICAL(&snapshot_lock);
+    if(!allowed){
+        __atomic_store_n(&reauth_pending,0,__ATOMIC_RELEASE);
+        return ESP_ERR_INVALID_STATE;
+    }
+    command_t cmd={.op=REAUTH};
+    if(xQueueSend(commands,&cmd,0)!=pdTRUE){
+        taskENTER_CRITICAL(&snapshot_lock);
+        snapshot.lifecycle=ALARM_TAILNET_RUNNING;
+        taskEXIT_CRITICAL(&snapshot_lock);
+        __atomic_store_n(&reauth_pending,0,__ATOMIC_RELEASE);
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
 }
 esp_err_t alarm_tailnet_stop(void) {
     if(__atomic_load_n(&initialized,__ATOMIC_ACQUIRE)!=2)return ESP_OK;

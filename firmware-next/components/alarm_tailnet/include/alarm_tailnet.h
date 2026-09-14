@@ -9,8 +9,14 @@ extern "C" {
  * The worker waits for SNTP before registration. No auth key is required. */
 typedef enum { ALARM_TAILNET_OFF, ALARM_TAILNET_CONNECTING, ALARM_TAILNET_AUTH_REQUIRED,
     ALARM_TAILNET_CONNECTED, ALARM_TAILNET_EXPIRED, ALARM_TAILNET_BLOCKED } alarm_tailnet_state_t;
+typedef enum { ALARM_TAILNET_LIFECYCLE_OFF, ALARM_TAILNET_QUEUED,
+    ALARM_TAILNET_STARTING, ALARM_TAILNET_RUNNING, ALARM_TAILNET_RETRY_WAIT,
+    ALARM_TAILNET_LIFECYCLE_BLOCKED } alarm_tailnet_lifecycle_t;
 typedef struct {
     alarm_tailnet_state_t state;
+    alarm_tailnet_lifecycle_t lifecycle;
+    uint8_t retry_count;
+    uint16_t retry_in_seconds;
     char auth_url[512]; /* Treat as sensitive: local admin UI only; never log. */
     char ip[16];
     int64_t expires_at;

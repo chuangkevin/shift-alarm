@@ -19,6 +19,11 @@ inline uint8_t brightnessDuty(uint8_t percent) {
   return uint8_t((uint16_t(percent) * 255 + 50) / 100);
 }
 
+inline bool settingsLoadValid(bool decoded, bool migrationRequired,
+                              bool migrationSaved) {
+  return decoded && (!migrationRequired || migrationSaved);
+}
+
 inline bool shouldTurnOff(uint16_t minutes, uint32_t now, uint32_t lastActivity,
                           bool mustStayOn) {
   if (minutes == 0 || mustStayOn) return false;

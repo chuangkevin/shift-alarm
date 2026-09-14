@@ -22,7 +22,7 @@ python3 deploy/ota_tailnet.py \
   --version 0.2.8
 ```
 
-預檢會透過裝置 Tailnet IP 取得本機頁與 nonce、確認原生 Tailnet 身分和 ACL、檢查固定後端及透過裝置代理取得 `/api/health`，並從後端驗證預期版本的 HMAC 清單。它不使用 DNS、LAN fallback、環境 HTTP proxy 或 HTTP redirect。後端清單由現有 DEVICE_TOKEN 按 `board\nversion\nsize\nsha256\n` 簽署；token 與 nonce 不會輸出。
+預檢會透過裝置 Tailnet IP 取得本機頁與 nonce、確認原生 Tailnet 身分和 ACL、檢查固定後端及透過裝置代理取得 `/api/health`，再依 `/api/update` 的 `canStart`／`reason` 檢查貪睡、排程、時鐘、響鈴、五分鐘內鬧鐘、Wi-Fi、Tailnet 與後端可達性，最後從後端驗證預期版本的 HMAC 清單。它不使用 DNS、LAN fallback、環境 HTTP proxy 或 HTTP redirect。後端清單由現有 DEVICE_TOKEN 按 `board\nversion\nsize\nsha256\n` 簽署；token 與 nonce 不會輸出。
 
 確認已接穩定電源後，同一命令加上 `--start --power-confirmed`，才會送出一次安裝請求。電源旗標是操作者確認，不是電壓量測。命令不重試安裝 POST，即使回應遺失也不重送。
 
@@ -44,6 +44,8 @@ sh firmware-next/components/alarm_ota/tests/run_host_tests.sh
 ```
 
 工具測試以假的 API 回應驗證拒絕規則、HMAC 與預檢唯讀性；不是實機 OTA 或真實 WireGuard/TLS 傳輸驗證。尚未執行實機更新時，不得把 host 測試或成功編譯記為 OTA 成功。
+
+0.3.9 的 `/api/update` 提供穩定 phase、reason、reconnect count、最後 HTTP 狀態、最後進度時間與 `canStart`。每次串流中斷的 Range reconnect handshake 最多嘗試三次並退避；啟動安裝的 POST 仍只送一次。真實 Range 中斷與續傳尚未在實機驗證。
 
 ## 目前實機狀態（2026-09-13）
 

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "alarm_tailnet.h"
 #include "microlink_internal.h"
+#include "nvs.h"
 #include <assert.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -16,15 +17,29 @@ int xQueueReceive(void *arg,void *item,unsigned timeout){queue_t*q=arg;double en
 typedef struct {void(*fn)(void*);void*arg;} task_t;
 static void *task_entry(void *arg){task_t t=*(task_t*)arg;free(arg);t.fn(t.arg);return NULL;}
 int xTaskCreate(void(*fn)(void*),const char *name,unsigned stack,void*arg,unsigned priority,void*handle){(void)name;(void)stack;(void)priority;(void)handle;task_t*t=malloc(sizeof(*t));*t=(task_t){fn,arg};pthread_t p;int err=pthread_create(&p,NULL,task_entry,t);if(!err)pthread_detach(p);return !err;}
-static atomic_int allocations,stops;
+static atomic_int allocations,stops,destroys,identity_writes,start_failures,stop_failures;
+static _Atomic(microlink_t*) active_client;
 microlink_t *microlink_init(const microlink_config_t *c){assert(c->max_peers==64);if(atomic_fetch_add(&allocations,1)==0)return NULL;microlink_t*m=calloc(1,sizeof(*m));m->security.lock=xSemaphoreCreateMutex();m->security.ready=m->security.peers_ready=m->security.authorized=true;m->vpn_ip=0x64400001;return m;}
-esp_err_t microlink_start(microlink_t*m){(void)m;return ESP_OK;}
-esp_err_t microlink_stop(microlink_t*m){(void)m;atomic_fetch_add(&stops,1);sleep_ms(200);return ESP_OK;}
-void microlink_destroy(microlink_t*m){vSemaphoreDelete(m->security.lock);free(m);}
+esp_err_t microlink_start(microlink_t*m){if(atomic_load(&start_failures)>0){atomic_fetch_sub(&start_failures,1);return ESP_FAIL;}atomic_store(&active_client,m);return ESP_OK;}
+esp_err_t microlink_stop(microlink_t*m){atomic_fetch_add(&stops,1);sleep_ms(200);if(atomic_load(&stop_failures)>0){atomic_fetch_sub(&stop_failures,1);return ESP_FAIL;}if(atomic_load(&active_client)==m)atomic_store(&active_client,NULL);return ESP_OK;}
+void microlink_destroy(microlink_t*m){atomic_fetch_add(&destroys,1);vSemaphoreDelete(m->security.lock);free(m);}
 void ml_security_close(microlink_t*m){m->security.ready=false;}
-bool microlink_is_connected(const microlink_t*m){return m!=NULL;}
+bool microlink_is_connected(const microlink_t*m){return m!=NULL&&atomic_load(&active_client)==m;}
 void microlink_ip_to_str(uint32_t ip,char*out){(void)ip;strcpy(out,"100.64.0.1");}
+esp_err_t nvs_open(const char*s,int mode,nvs_handle_t*n){(void)s;(void)mode;*n=1;return ESP_OK;}
+esp_err_t nvs_set_blob(nvs_handle_t n,const char*k,const void*v,size_t len){(void)n;(void)v;(void)len;if(strcmp(k,"wg_private")==0)atomic_fetch_add(&identity_writes,1);return ESP_OK;}
+esp_err_t nvs_commit(nvs_handle_t n){(void)n;return ESP_OK;}
+void nvs_close(nvs_handle_t n){(void)n;}
 static alarm_tailnet_status_t wait_state(alarm_tailnet_state_t target){double end=now()+3;alarm_tailnet_status_t s;do{assert(alarm_tailnet_get_status(&s)==ESP_OK);if(s.state==target)return s;sleep_ms(5);}while(now()<end);fprintf(stderr,"state %d wanted %d error %d\n",s.state,target,s.last_error);assert(0);return s;}
-int main(void){double begin=now();assert(alarm_tailnet_start("test-device")==ESP_OK);assert(now()-begin<0.1);wait_state(ALARM_TAILNET_BLOCKED);/* First allocation failed: manual join must recover without rotating an absent client. */assert(alarm_tailnet_reauth()==ESP_OK);wait_state(ALARM_TAILNET_CONNECTED);
- begin=now();assert(alarm_tailnet_reauth()==ESP_OK);assert(now()-begin<0.1);unsigned reads=0;double end=now()+0.15;while(now()<end){alarm_tailnet_status_t s;double t=now();assert(alarm_tailnet_get_status(&s)==ESP_OK);assert(now()-t<0.1);reads++;}assert(reads>100);wait_state(ALARM_TAILNET_CONNECTED);assert(atomic_load(&stops)>0);
- begin=now();assert(alarm_tailnet_stop()==ESP_OK);assert(now()-begin<0.1);wait_state(ALARM_TAILNET_OFF);puts("PASS: nonblocking lifecycle/status during slow stop, retry after init failure, worker-owned reauth/destroy");}
+int main(void){double begin=now();assert(alarm_tailnet_start("test-device")==ESP_OK);assert(now()-begin<0.1);alarm_tailnet_status_t queued;assert(alarm_tailnet_get_status(&queued)==ESP_OK);assert(queued.lifecycle==ALARM_TAILNET_QUEUED||queued.lifecycle==ALARM_TAILNET_STARTING);/* First allocation fails transiently and must recover without reboot or reauthorization. */wait_state(ALARM_TAILNET_CONNECTED);assert(atomic_load(&allocations)>=2);
+ int reauth_allocations=atomic_load(&allocations),reauth_stops=atomic_load(&stops),reauth_destroys=atomic_load(&destroys),reauth_writes=atomic_load(&identity_writes);atomic_store(&stop_failures,1);
+ assert(alarm_tailnet_reauth()==ESP_OK);double end=now()+8;alarm_tailnet_status_t reauth_recovery;do{assert(alarm_tailnet_get_status(&reauth_recovery)==ESP_OK);if(reauth_recovery.state==ALARM_TAILNET_CONNECTED)break;assert(reauth_recovery.lifecycle!=ALARM_TAILNET_RUNNING);sleep_ms(5);}while(now()<end);
+ assert(reauth_recovery.state==ALARM_TAILNET_CONNECTED);assert(atomic_load(&allocations)==reauth_allocations+1);assert(atomic_load(&stops)==reauth_stops+2);assert(atomic_load(&destroys)==reauth_destroys+1);assert(atomic_load(&identity_writes)==reauth_writes+1);
+ begin=now();int stops_before_duplicate=atomic_load(&stops);assert(alarm_tailnet_reauth()==ESP_OK);assert(alarm_tailnet_reauth()!=ESP_OK);assert(now()-begin<0.1);unsigned reads=0;end=now()+0.15;while(now()<end){alarm_tailnet_status_t s;double t=now();assert(alarm_tailnet_get_status(&s)==ESP_OK);assert(now()-t<0.1);reads++;}assert(reads>100);wait_state(ALARM_TAILNET_CONNECTED);assert(atomic_load(&stops)==stops_before_duplicate+1);
+ stops_before_duplicate=atomic_load(&stops);assert(alarm_tailnet_reauth()==ESP_OK);wait_state(ALARM_TAILNET_CONNECTED);assert(atomic_load(&stops)==stops_before_duplicate+1);
+ assert(alarm_tailnet_stop()==ESP_OK);wait_state(ALARM_TAILNET_OFF);
+ int allocations_before=atomic_load(&allocations),stops_before=atomic_load(&stops),destroys_before=atomic_load(&destroys);atomic_store(&start_failures,1);atomic_store(&stop_failures,1);
+ assert(alarm_tailnet_start("test-device")==ESP_OK);end=now()+8;alarm_tailnet_status_t recovery;
+ do{assert(alarm_tailnet_get_status(&recovery)==ESP_OK);if(recovery.state==ALARM_TAILNET_CONNECTED)break;assert(recovery.lifecycle!=ALARM_TAILNET_RUNNING);sleep_ms(5);}while(now()<end);
+ assert(recovery.state==ALARM_TAILNET_CONNECTED);assert(atomic_load(&allocations)==allocations_before+2);assert(atomic_load(&stops)==stops_before+2);assert(atomic_load(&destroys)==destroys_before+1);
+ begin=now();assert(alarm_tailnet_stop()==ESP_OK);assert(now()-begin<0.1);wait_state(ALARM_TAILNET_OFF);puts("PASS: nonblocking lifecycle/status, coalesced reauth, and failed-start cleanup recovery");}
