@@ -13,7 +13,7 @@ AI 接手規則見 `AGENTS.md`，完整現況見 `docs/AI接手開發.md`。以�
 - [x] 網域入口已改為直接代理 ESP32，因此網域與裝置區網 IP 使用同一份介面與資料。
 - [x] 0.3.8 已安全寫入非執行中分區並完成實機驗收：跨月連續上班抑制、外框顯示、每筆時間獨立開關、持續心跳、儲存班表堆疊修正、持久亮度設定，以及依臺北時間顯示今天的紅點與細紅框。今天標記每分鐘原地更新，不會清除日期按鈕焦點。OTA Range 續傳只有 host 測試，待下一次實機 OTA 驗收。
 - [x] 後端 0.1.2 已部署；Gemini `max_tokens` 預設 6000 且強制不低於 400。
-- [x] 0.3.10／後端 0.1.3 原始碼完成兩階段 staged OTA、GPIO38 fail-closed 充電 gate、三個獨立 mutation API／CLI 模式與可在本機執行的 host 測試；未部署。
+- [x] 0.3.10／後端 0.1.4 原始碼完成兩階段 staged OTA、GPIO38 fail-closed 充電 gate、三個獨立 mutation API／CLI 模式與可在本機執行的 host 測試；後端 0.1.4 另以 4 KiB、每塊間隔 5 ms 串流映像；未部署。
 
 ## 目前可接續工作
 
@@ -31,4 +31,5 @@ AI 接手規則見 `AGENTS.md`，完整現況見 `docs/AI接手開發.md`。以�
 - 第一次從原廠韌體遷移仍需受控 USB 安裝；正常後續更新使用 Tailscale OTA。
 - Tailscale 裝置 IP 可能在重新授權後改變；每次部署都要從即時狀態取得。
 - 0.3.3 下載曾在 666,392 / 1,569,792 位元組停滯後安全中止。0.3.8 以 USB 僅寫入非執行中 app0 與單一 OTA 選擇 sector，未改 NVS、bootloader 或分區表；Range 續傳仍須在下一次實機 OTA 驗收。
+- 0.3.8 對 1,617,664-byte 映像的兩次明確單次下載，分別在 1,309,111 與 356,671 bytes 停止並回報舊版合併錯誤；停止位置不固定。後端 0.1.4 的 paced stream 是協助 0.3.8 bootstrap 的 mitigation，須以 live retry 證明，尚不可記為已修復。
 - 0.3.10 的 GPIO38 gate、staged flash、離線安裝、實體 TFT 排版、真實 Range reconnect 與 live OTA 尚未在硬體／實際網路驗證。原始碼或 host 測試通過不代表已部署。

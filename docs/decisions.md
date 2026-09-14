@@ -23,4 +23,6 @@
 - 安裝不依賴後端或網路；它重新驗 manifest/marker HMAC、從 partition table 推導 inactive slot、重讀整片 flash SHA/descriptor、重跑 local guards，清 marker 成功後才切 boot。boot selection 失敗時保留目前版本並要求重新下載。
 - marker I/O 結果不明時進入 fail-closed `marker-fault`。它不等同「沒有更新」：不得下載覆寫 target，也不得假設可安裝。GET／boot observation 只 load/validate，絕不 clear/store 或改 flash；可無寫入恢復 authenticated staged record或 confirmed absence。corrupt/incompatible marker 必須由明確 discard 清理，且 clear 後再次 load 確認不存在才回 idle。
 - 實體 240×240 畫面以非響鈴狀態短按「－」切換 `檢查更新` 資訊頁；只顯示版本、staged 狀態、充電 readiness 與 `/update` QR，不從實體鍵下載或安裝。響鈴任意鍵停鈴、BOOT 關屏、任意鍵喚醒及「＋」「－」十秒配網不變。
-- 0.3.10／0.1.3 尚未部署。GPIO38、實體 240×240 UI、persisted staged image、離線安裝與 live OTA 均保留為未驗證，不以 code 或 host 測試代替。
+- 0.3.10／後端 0.1.4 尚未部署。GPIO38、實體 240×240 UI、persisted staged image、離線安裝與 live OTA 均保留為未驗證，不以 code 或 host 測試代替。
+- 0.3.8 從後端 0.1.3 下載 1,617,664-byte 映像的兩次明確單次嘗試，分別在 1,309,111 與 356,671 bytes 停止，裝置回報舊版合併的 `n<=0 || alarm_ota_write` 錯誤；裝置保持健康。停止位置不固定，不能只憑這兩次結果證明單一根因。
+- 後端 0.1.4 只對 authenticated firmware binary endpoint 改用 4096-byte chunks，chunk 之間等待 5 ms；1,617,664 bytes 約 395 個 chunks，單是 pacing 約增加 2 秒，連同傳輸與 flash 寫入以約 8 秒完成為目標，仍遠低於舊版 600 秒總期限。這是降低原生 Tailnet/TCP burst pressure、協助 0.3.8 bootstrap 的 mitigation；live retry 前不宣稱已修復。

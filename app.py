@@ -11,6 +11,8 @@ import logging
 import os
 import re
 import sqlite3
+import stat
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -21,15 +23,16 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
+import anyio
 import qrcode
 import qrcode.image.svg
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError, model_validator
 
-VERSION = '0.1.3'
+VERSION = '0.1.4'
 TZ = ZoneInfo('Asia/Taipei')
 DATA = Path(os.environ.get('ALARM_DATA', './data'))
 DATA.mkdir(parents=True, exist_ok=True)
@@ -283,13 +286,64 @@ def device_schedule():
                 'command': get(c, 'command')}
 
 FIRMWARE_BOARD = 'xingzhi-cube-1.54tft-wifi'
+FIRMWARE_CHUNK_SIZE = 4096
+FIRMWARE_CHUNK_DELAY_SECONDS = 0.005
 
-def available_firmware():
+
+def close_firmware_descriptor(descriptor):
+    os.close(descriptor)
+
+
+def seek_firmware_descriptor(descriptor, offset):
+    os.lseek(descriptor, offset, os.SEEK_SET)
+
+
+def read_firmware_descriptor(descriptor, size):
+    return os.read(descriptor, size)
+
+
+class FirmwareDescriptor:
+    def __init__(self, descriptor):
+        self.descriptor = descriptor
+        self.lock = threading.Lock()
+
+    def seek(self, offset):
+        with self.lock:
+            seek_firmware_descriptor(self.descriptor, offset)
+
+    def read(self, size):
+        with self.lock:
+            return read_firmware_descriptor(self.descriptor, size)
+
+    def close(self):
+        with self.lock:
+            if self.descriptor is None:
+                return
+            descriptor = self.descriptor
+            self.descriptor = None
+        close_firmware_descriptor(descriptor)
+
+
+class FirmwareStreamingResponse(StreamingResponse):
+    def __init__(self, descriptor, *args, **kwargs):
+        self.firmware_descriptor = descriptor
+        super().__init__(*args, **kwargs)
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with anyio.CancelScope(shield=True):
+                await anyio.to_thread.run_sync(self.firmware_descriptor.close)
+
+
+def available_firmware(keep_open=False):
     """Only an operator-published immutable binary can become an update."""
     release_dir = DATA / 'releases'
     active = release_dir / 'active.json'
     if not active.exists():
         return None
+    descriptor = None
     try:
         item = json.loads(active.read_text())
         board, version, digest, size = (item[k] for k in ('board', 'version', 'sha256', 'size'))
@@ -298,24 +352,42 @@ def available_firmware():
         if not re.fullmatch(r'[0-9a-f]{64}', digest) or type(size) is not int or not 256 <= size <= 4 * 1024 * 1024:
             raise ValueError('release size or digest')
         binary = release_dir / (digest + '.bin')
-        if binary.is_symlink() or binary.stat().st_size != size:
+        descriptor = os.open(binary, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        file_stat = os.fstat(descriptor)
+        path_stat = os.stat(binary, follow_symlinks=False)
+        if (not stat.S_ISREG(file_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode)
+                or (file_stat.st_dev, file_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino)
+                or file_stat.st_size != size):
             raise ValueError('release file')
-        raw = binary.read_bytes()
-        if raw[0] != 0xe9 or int.from_bytes(raw[12:14], 'little') != 9 or hashlib.sha256(raw).hexdigest() != digest:
+        image_hash = hashlib.sha256()
+        header = os.read(descriptor, 112)
+        image_hash.update(header)
+        while chunk := os.read(descriptor, 64 * 1024):
+            image_hash.update(chunk)
+        if len(header) < 112 or header[0] != 0xe9 or int.from_bytes(header[12:14], 'little') != 9 or image_hash.hexdigest() != digest:
             raise ValueError('release image')
         # ESP-IDF app descriptor after the 24-byte image and 8-byte segment headers.
-        if int.from_bytes(raw[32:36], 'little') != 0xabcd5432:
+        if int.from_bytes(header[32:36], 'little') != 0xabcd5432:
             raise ValueError('app descriptor')
-        image_version = raw[48:80].split(b'\0', 1)[0].decode('ascii')
-        image_board = raw[80:112].split(b'\0', 1)[0].decode('ascii')
+        image_version = header[48:80].split(b'\0', 1)[0].decode('ascii')
+        image_board = header[80:112].split(b'\0', 1)[0].decode('ascii')
         if image_version != version or image_board != board:
             raise ValueError('binary identity mismatch')
         canonical = f'{board}\n{version}\n{size}\n{digest}\n'.encode()
-        return {'board': board, 'version': version, 'size': size, 'sha256': digest,
-                'hmac_sha256': hmac.new(DEVICE_TOKEN.encode(), canonical, hashlib.sha256).hexdigest(),
-                'path': f'/api/device/firmware/{digest}.bin'}
+        release = {'board': board, 'version': version, 'size': size, 'sha256': digest,
+                   'hmac_sha256': hmac.new(DEVICE_TOKEN.encode(), canonical, hashlib.sha256).hexdigest(),
+                   'path': f'/api/device/firmware/{digest}.bin'}
+        if keep_open:
+            seek_firmware_descriptor(descriptor, 0)
+            result = (release, descriptor)
+            descriptor = None
+            return result
+        return release
     except (OSError, ValueError, KeyError, TypeError, UnicodeError) as e:
         raise HTTPException(503, '更新檔尚未通過驗證，原有韌體不受影響') from e
+    finally:
+        if descriptor is not None:
+            close_firmware_descriptor(descriptor)
 
 @app.get('/api/device/update')
 def firmware_update():
@@ -323,11 +395,65 @@ def firmware_update():
     return {'available': release is not None, 'manifest': release}
 
 @app.get('/api/device/firmware/{digest}.bin')
-def firmware_binary(digest: str):
-    release = available_firmware()
-    if not release or digest != release['sha256']:
-        raise HTTPException(404, '找不到此更新版本')
-    return FileResponse(DATA / 'releases' / (digest + '.bin'), media_type='application/octet-stream')
+def firmware_binary(digest: str, request: Request):
+    descriptor = None
+    try:
+        opened = available_firmware(keep_open=True)
+        if not opened:
+            raise HTTPException(404, '找不到此更新版本')
+        release, descriptor = opened
+        if digest != release['sha256']:
+            raise HTTPException(404, '找不到此更新版本')
+        size = release['size']
+        range_header = request.headers.get('range')
+        start = 0
+        status_code = 200
+        response_headers = {'Accept-Ranges': 'bytes'}
+        if range_header is not None:
+            match = re.fullmatch(r'bytes=([0-9]{1,10})-', range_header)
+            if not match or (start := int(match.group(1))) >= size:
+                return Response(status_code=416, headers={
+                    'Accept-Ranges': 'bytes',
+                    'Content-Range': f'bytes */{size}',
+                })
+            status_code = 206
+            response_headers['Content-Range'] = f'bytes {start}-{size - 1}/{size}'
+        length = size - start
+        response_headers['Content-Length'] = str(length)
+        stream_descriptor = FirmwareDescriptor(descriptor)
+        response = FirmwareStreamingResponse(
+            stream_descriptor,
+            firmware_chunks(stream_descriptor, start, length),
+            status_code=status_code,
+            media_type='application/octet-stream',
+            headers=response_headers,
+        )
+        descriptor = None
+        return response
+    finally:
+        if descriptor is not None:
+            close_firmware_descriptor(descriptor)
+
+
+async def firmware_chunks(descriptor: FirmwareDescriptor, start: int, length: int):
+    try:
+        await anyio.to_thread.run_sync(descriptor.seek, start)
+        remaining = length
+        first = True
+        while remaining:
+            chunk = await anyio.to_thread.run_sync(
+                descriptor.read, min(FIRMWARE_CHUNK_SIZE, remaining)
+            )
+            if not chunk:
+                return
+            if not first:
+                await asyncio.sleep(FIRMWARE_CHUNK_DELAY_SECONDS)
+            first = False
+            remaining -= len(chunk)
+            yield chunk
+    finally:
+        with anyio.CancelScope(shield=True):
+            await anyio.to_thread.run_sync(descriptor.close)
 
 @app.post('/api/device/heartbeat')
 def heartbeat(body: Heartbeat):

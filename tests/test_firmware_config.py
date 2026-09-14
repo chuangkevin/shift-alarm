@@ -81,4 +81,4 @@ def test_reliability_contract_and_versions_are_wired():
     assert "settingsLoadValid" in source
     assert "ota_manifest::available" in source
     assert 'set(PROJECT_VER "0.3.10")' in Path("firmware-next/CMakeLists.txt").read_text()
-    assert "VERSION = '0.1.3'" in Path("app.py").read_text()
+    assert "VERSION = '0.1.4'" in Path("app.py").read_text()
