@@ -30,7 +30,7 @@
 - 第四次改由 GN100 送出控制請求，裝置在 760,496 bytes 停止；後端 0.1.5 保留 4 KiB chunk 但移除 5 ms 間隔後，第五次仍在 358,736 bytes 停止。FileResponse、4 KiB paced 與 4 KiB continuous 都無法避免 0.3.8 在 `available()>0` 後 `read()==0` 即中止；不得再重送。現行下一步是第二台裝置以 Mac USB 資料線 bootstrap 0.3.12。
 - 韌體 0.3.11：240×240 主畫面只顯示日期、星期、電池、HH:MM、下次上班、響鈴時間與真實倒數；沒有未來鬧鐘時顯示 `尚無下一次鬧鐘`。QR、網址、連線、班表與更新診斷移至六項實體選單。
 - 三鍵改為純狀態機輪詢：30 ms debounce，中鍵長按 1.2 秒且放開後關屏，關屏按鍵只喚醒，左右同按 10 秒優先配網，響鈴時任一原始按鍵立即停鈴。選單 15 秒無操作返回主畫面。
-- AP 與 Tailnet 名稱尾碼改由 `esp_read_mac(..., ESP_MAC_WIFI_STA)` 的 STA MAC bytes 4、5 產生；`fc:01:2c:c9:9c:a8` 顯示 `9CA8`。目前只有來源碼、host 測試與建置驗證，第二台裝置燒錄前不宣稱硬體完成。
+- AP 與 Tailnet 名稱尾碼改由 `esp_read_mac(..., ESP_MAC_WIFI_STA)` 的 STA MAC bytes 4、5 產生；`fc:01:2c:c9:9c:a8` 顯示 `9CA8`。本決策寫入當時只有來源碼、host 測試與建置驗證；後續第二台已完成燒錄，現況版本與硬體驗收範圍以 `docs/AI接手開發.md` 為準。
 - 韌體 0.3.12：最多四組 Wi-Fi 使用 schema 3 的 A/B generation+CRC slots 與 checksummed active selector 保存在 `alarm_nvs`。inactive slot 與 selector 都完成 exact readback 後才套用，舊 active slot 之後才明確清除。selector 結果不明時進 storage-fault 並封鎖 mutation；reload 只套用 selector 明確授權且 generation 相符的 slot，不依較新 orphan slot猜測。舊 `wifi-v1` 或 `ssid`／`password` 也走同一 transaction，selector+slot 驗證成功後才刪除。
 - 2026-09-15 第二台 ESP32-S3 已以隔離 provisioning 寫入 0.3.12 app0；寫後 SHA 與啟動版本通過，無 panic／boot loop／storage fault。兩組 Wi-Fi 以一次性私有 seed 經正式 A/B transaction 保存，再刷回不含 Wi-Fi 密碼的一般 0.3.12；重開仍為 saved mode。seed 映像、NVS snapshot 與 source 巨集已清除；RF failover、管理頁新增／移除仍待操作驗證。
 - 斷線後 async scan，以 RSSI 由強到弱嘗試可見保存網路，平手依保存順序；hidden 網路最後依保存順序各試一次。每組 20 秒，整輪失敗以 2 至 60 秒退避。健康連線不因其他 SSID 較強而切換。

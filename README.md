@@ -4,7 +4,7 @@
 
 ESP32-S3 星智 CUBE 1.54 吋獨立鬧鐘。班表與響鈴設定保存在裝置；手機在裝置網頁編輯月曆，也可經裝置的原生 Tailscale 上傳圖片至私有辨識服務。
 
-新版韌體位於 `firmware-next/`。原始碼版本為 0.3.13，後端／映像版本維持 0.1.5；後端 0.1.5 與 GN100 Caddy 離線 fallback 已部署。第一台仍為 0.3.8，第二台已用隔離 provisioning 經 USB 啟動 0.3.13 並保存兩組不同 SSID。0.3.13 把後端 HTTP 與 schedule 處理移到 bounded worker，主迴圈不再等待網路；所有實體 QR 使用 scale 3。重開確認 profile 保留，無 panic／boot loop／storage fault。兩組 Wi-Fi 實際 failover、GPIO38、實體 QR 掃描、按鍵、真實 flash marker、離線安裝與新版 live OTA 仍待操作驗證。
+新版韌體位於 `firmware-next/`。原始碼版本為 0.3.17，已建置與發布但尚未安裝；第一台仍為 0.3.8，第二台已用 USB 啟動 0.3.16 並保存兩組不同 SSID。主要後端 0.1.5（`:8237`）、第二台隔離後端 0.1.6（`:8238`）與 GN100 Caddy 離線 fallback 已部署。重開確認 profile 保留，無 panic／boot loop／storage fault。兩組 Wi-Fi 實際 failover、GPIO38、實體 QR 掃描、按鍵、真實 flash marker、離線安裝與新版 live OTA 仍待完整操作驗證。
 
 0.2.8 已實測手機經 ESP32 與原生 Tailscale 上傳九月班表，36.851 秒辨識出正確 11 天。升至 0.3.1 後，Wi-Fi、90 度方向、11 筆鬧鐘與班表 revision 均保留。0.2.9 的首次 OTA 下載中止且保留原版本；0.3.0 起已加入十分鐘總期限、三十秒無進度保護與進度回報。0.3.2 已從 0.3.1 經原生 Tailscale 完整 OTA，下載、驗證、重開、回連與保存資料檢查均通過。
 
@@ -41,7 +41,7 @@ Wi-Fi 設定以 `wifi-v2-a`／`wifi-v2-b` 兩個 generation+CRC slot 與 checksu
 
 Python 3.12 / FastAPI，部署在 `rpi-matrix:/home/kevin/DockerCompose/shift-alarm`，服務位址 `http://100.126.226.79:8237`。它只提供 AI 辨識、心跳與私有韌體。`https://alarm.sisihome.org` 經 GN100 Caddy 限 Tailnet 存取，直接代理 ESP32 的 Tailscale port 80；根路徑轉到 `/calendar`。因此網域和裝置區網 IP 使用同一份 ESP32 介面與資料。
 
-圖片辨識目前使用 GN100 New API 的 OpenAI-compatible 介面與 `gemini-flash`；`max_tokens` 預設 6000 且強制不低於 400。這個 OpenAI-compatible 入口沒有提供原生 Gemini `thinkingBudget` 欄位，因此保留模型思考並以足夠輸出額度避免空字串。裝置網頁先做八秒健康檢查，整次等待最多六十秒；後端模型呼叫最多四十五秒。逾時會中止等待，不套用班表。辨識金鑰僅存在後端，不放進裝置或瀏覽器。
+圖片辨識目前使用 GN100 New API 的 OpenAI-compatible 介面與 `gemini-flash`；`max_tokens` 預設 6000 且強制不低於 400。這個 OpenAI-compatible 入口沒有提供原生 Gemini `thinkingBudget` 欄位，因此保留模型思考並以足夠輸出額度避免空字串。0.3.17 原始碼將健康檢查／整體等待放寬為 60／240 秒；第二台使用的後端 0.1.6 模型等待為 180 秒。0.3.17 尚未安裝，第一台 0.3.8 與第二台 0.3.16 仍受各自已安裝前端的舊限制。逾時不套用班表；辨識金鑰只存在後端。
 
 | 環境變數 | 用途 |
 |---|---|

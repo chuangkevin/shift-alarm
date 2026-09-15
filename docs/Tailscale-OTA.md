@@ -69,4 +69,4 @@ sh firmware-next/components/alarm_ota/tests/run_host_tests.sh
 python3 firmware-next/components/alarm_ota/tests/test_manifest_contract.py
 ```
 
-0.3.13 會在 Tailnet 連線後才同步輪詢後端，並把所有實體 QR 放大為 scale 3。目前只有來源碼、host tests 與 credential-free build 證據，尚待刷入第二台。GPIO38 真實行為、四組 Wi-Fi failover、240×240 實體畫面與按鍵、real-flash staged image、跨重開保存、離線安裝及 live OTA，均須由第二台裝置在線且供電後實測；不得把 host 結果記成硬體驗收。
+第二台實機目前安裝 0.3.16；0.3.17 已有來源碼、host tests、credential-free build 與發布映像，但尚未安裝到任何裝置。GPIO38 真實行為、四組 Wi-Fi failover、240×240 實體畫面與按鍵、real-flash staged image、跨重開保存、離線安裝及 live OTA，仍未完成整套硬體／實際網路驗收；不得把 host 結果或已發布映像記成硬體完成。

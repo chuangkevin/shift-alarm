@@ -17,6 +17,7 @@ AI 接手規則見 `AGENTS.md`，完整現況見 `docs/AI接手開發.md`。以�
 - [x] 第二台 ESP32-S3 已於 2026-09-15 經 USB 啟動 0.3.12；版本、`ShiftAlarm-9CA8`、寫後 SHA 通過，無 panic／boot loop／storage fault。
 - [x] 第二台已用一次性私有 seed 經正式 A/B transaction 保存兩組不同 SSID；刷回不含 Wi-Fi 密碼的一般 0.3.12 後，重開仍為 saved mode，沒有配網 AP 或 storage fault。seed 映像、NVS snapshot 與 source 巨集已清除。
 - [x] 0.3.13 已刷入第二台：後端 HTTP 與 schedule 處理移出主迴圈，按鍵與鬧鐘檢查不再等待網路；所有實體 QR 統一放大為 version 8、scale 3。啟動保留兩組 Wi-Fi，無 panic／boot loop／storage fault。
+- [x] 第二台已用 USB 更新至 0.3.16；設定的後端 Tailnet 位址／port 會套用到 AI proxy。0.3.17 已建置及發布但尚未安裝。
 
 ## 目前可接續工作
 
@@ -39,6 +40,6 @@ AI 接手規則見 `AGENTS.md`，完整現況見 `docs/AI接手開發.md`。以�
 - 0.3.3 下載曾在 666,392 / 1,569,792 位元組停滯後安全中止。0.3.8 以 USB 僅寫入非執行中 app0 與單一 OTA 選擇 sector，未改 NVS、bootloader 或分區表；Range 續傳仍須在下一次實機 OTA 驗收。
 - 0.3.8 對 1,617,664-byte 映像的兩次明確單次下載，分別在 1,309,111 與 356,671 bytes 停止；後端 0.1.4 paced stream 部署後，第三次 POST 在開始前被斷線，裝置狀態未重置。三次均未完成，裝置保持 0.3.8 與原設定；停止 OTA 重送，改走 USB bootstrap。
 - 第四次由 GN100 送出控制請求後，0.3.8 在 760,496 bytes 停止；後端 0.1.5 改為 4 KiB 連續串流後，第五次仍在 358,736 bytes 停止。server 端三種 chunk 策略均重現裝置端 `read()==0` 即中止；停止 OTA 重送，唯一下一步是第二台裝置以 Mac USB 資料線 bootstrap 目前候選 0.3.12。
-- 0.3.13 尚待刷入第二台；GPIO38 gate、staged flash、離線安裝、實體 TFT 排版與按鍵、四組 Wi-Fi failover、真實 Range reconnect、全部大型 QR 與 live OTA 尚未在硬體／實際網路驗證。原始碼、host 測試或建置通過不代表已部署。
-- 2026-09-15 OTA 根因已定位：傳輸途中 `alarm_ota_maintenance()` 每約 10 ms 重跑安全檢查，任一項瞬斷就丟棄整個傳輸，錯誤訊息又把原因偽裝成 `resume-failed`。先前調整後端 chunk 大小與節奏並非有效方向。詳見 `docs/ota-research.md`。
-- 第二台 0.3.16 在線，接手機熱點走 DERP relay；OTA 下載閘門 `backend-poll-busy` 幾乎永遠擋住下載（51 次取樣只 3 次可下載）。修正需要新韌體，因此必須 USB 一次。
+- 第二台目前為 0.3.16；0.3.17 尚未安裝。GPIO38 gate、staged flash、離線安裝、實體 TFT 排版與按鍵、四組 Wi-Fi failover、真實 Range reconnect、全部大型 QR 與 live OTA 尚未完成硬體／實際網路驗證。原始碼、host 測試或建置通過不代表已部署。
+- 2026-09-15 OTA 中止的程式缺陷已定位：傳輸途中 `alarm_ota_maintenance()` 每約 10 ms 重跑安全檢查，任一項瞬斷就丟棄整個傳輸，錯誤訊息又把原因偽裝成 `resume-failed`；第二台當次究竟是哪一項護欄瞬斷仍待序列診斷。先前調整後端 chunk 大小與節奏並非有效方向。詳見 `docs/ota-research.md`。
+- 第二台 0.3.16 最後在線時接手機熱點走 DERP relay；OTA 下載閘門 `backend-poll-busy` 幾乎永遠擋住下載（51 次取樣只 3 次可下載）。目前兩台裝置均離線；修正需要新韌體，因此必須在第二台重新接回 USB 後處理一次。

@@ -22,27 +22,26 @@
 |---|---|---|
 | 韌體原始碼 `firmware-next/` | 0.3.17 | 已建置，**尚未安裝到任何裝置** |
 | 第一台裝置 | 0.3.8 | 離線中（`shiftalarm-01fc`） |
-| 第二台裝置 | 0.3.16 | 在線，可操作 |
+| 第二台裝置 | 0.3.16 | 離線中（`shiftalarm-9ca8`） |
 | 主要後端 `:8237` | 0.1.5 | 已部署 |
 | 第二台專用後端 `:8238` | 0.1.6 | 已部署（隔離環境） |
 | GN100 Caddy 離線 fallback | — | 已部署 |
 
 ### 分支
 
-- `main` 最新：`29c2d09`
-- 未合併分支：`fix/tailnet-ui-latency` 最新 `2a46656`，領先 `main` 4 個 commit
-  - `5ebcd40` 降低 Tailnet 逐封包日誌
-  - `93088d9` AI proxy 改走裝置設定的後端位址與 port
-  - `142e135` 放寬辨識預算與上傳尺寸（後端 0.1.6）
-  - `2a46656` OTA 失敗根因研究
+- 本次整理前，local／remote `main` 的共同基準為 `dbbb36a`。接手時必須用 `git fetch`、`git rev-parse HEAD` 與 `git rev-parse origin/main` 重新確認，不要把這個雜湊當成永久現況。
+- `fix/tailnet-ui-latency` 的四個功能／研究 commit 已合併進 `main`；遠端分支指標仍停在 `79a306b`，不是待合併工作，不要切回該分支繼續開發。
 
 ### 裝置
 
-- 第一台：`shiftalarm-01fc`，Tailnet `100.90.212.116`，目前離線。`alarm.sisihome.org` 代理的是這一台。
+以下在線狀態是 2026-09-15 的查詢快照，會隨網路改變；接手後先向 Headscale／Tailscale API 重查 `online` 與 `lastSeen`。
+
+- 第一台：`shiftalarm-01fc`，Tailnet `100.90.212.116`，目前離線；2026-09-15 05:44（UTC+8）後未再上線。`alarm.sisihome.org` 代理的是這一台，瀏覽器目前會看到後端離線頁。
 - 第二台：`shiftalarm-9ca8`，USB MAC `fc:01:2c:c9:9c:a8`，Tailnet `100.104.66.47`。
   - 已保存兩組 Wi-Fi（`Mark`、`PETER-2.4G`），重開仍為 saved mode。
-  - 目前 `alarmCount=0`、電池 100 %、充電中。
-  - 接的是手機熱點，Tailscale 走 DERP relay（`direct connection not established`），小請求要 12–40 秒。
+  - 目前離線；Tailscale 最後上線時間為 2026-09-15 20:50（UTC+8），後端最後收到心跳為 20:52:43，回報區網 IP `192.168.9.54`。離線前最後已知為 `alarmCount=0`、電池 100 %、未充電。
+  - 最後一次在線時接手機熱點，Tailscale 走 DERP relay（`direct connection not established`），小請求要 12–40 秒。
+  - 畫面「已保存 N 組」只代表 NVS 內有設定，不代表目前掃描得到該 SSID。0.3.16 關閉 Arduino 內建 `AutoReconnect`，由自訂掃描／逐組嘗試／退避流程重連；目前沒有把 disconnect reason 保存到後端，裝置離線後無法遠端區分掃描不到、密碼拒絕或基地台相容性問題。
 
 ### 後端與代理
 
@@ -56,7 +55,7 @@
 
 完整研究在 [docs/ota-research.md](ota-research.md)。摘要：
 
-**根因**：`main.cpp:980` 的主迴圈每約 10 ms 執行 `alarm_ota_maintenance()`。它在傳輸途中重跑安全檢查，任何一項瞬間不成立就 `discard_transfer()`（`alarm_ota.c:454`、`61`），中止 OTA、進度歸零；下一次寫入拿到 `ESP_ERR_INVALID_STATE` 而中止。
+**已定位的程式缺陷**：`main.cpp:980` 的主迴圈每約 10 ms 執行 `alarm_ota_maintenance()`。它在傳輸途中重跑安全檢查，任何一項瞬間不成立就 `discard_transfer()`（`alarm_ota.c:454`、`61`），中止 OTA、進度歸零；下一次寫入拿到 `ESP_ERR_INVALID_STATE` 而中止。第一台的時間點與鬧鐘 quiet window 相符；第二台當次究竟是哪一項護欄瞬斷仍缺序列證據，充電訊號抖動只是最可能推論。
 
 **安全檢查條件**：時鐘、班表就緒、充電中、未響鈴、未貪睡，以及下一次鬧鐘不在 300 秒內。
 
