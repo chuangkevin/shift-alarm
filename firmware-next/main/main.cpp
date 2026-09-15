@@ -929,6 +929,11 @@ void routes() {
   server.onNotFound([]{if(portal){server.sendHeader("Location","http://192.168.4.1/");server.send(302,"text/plain","");}else server.send(404,"text/plain; charset=utf-8","找不到此頁面");}); server.begin();deviceRoutesReady=true;
 }
 void setup() {
+  // Keep warnings/errors; packet-by-packet network logging stalls USB output.
+  esp_log_level_set("ml_wg_mgr", ESP_LOG_WARN);
+  esp_log_level_set("ml_net_io", ESP_LOG_WARN);
+  esp_log_level_set("ml_tcp", ESP_LOG_WARN);
+  esp_log_level_set("ml_derp", ESP_LOG_WARN);
   rtc_gpio_hold_dis(GPIO_NUM_21);rtc_gpio_init(GPIO_NUM_21);rtc_gpio_set_direction(GPIO_NUM_21,RTC_GPIO_MODE_OUTPUT_ONLY);rtc_gpio_set_level(GPIO_NUM_21,1); // Match the verified upstream board power control.
   Serial.begin(115200);ESP_ERROR_CHECK(nvs_flash_init());if(psramFound())heap_caps_malloc_extmem_enable(4096); esp_err_t nvs=nvs_flash_init_partition("alarm_nvs");ESP_ERROR_CHECK(nvs);if(!prefs.begin("shift-alarm",false,"alarm_nvs")){Serial.println("SETTINGS_STORAGE_FAILED");abort();}
   char nonce[33];snprintf(nonce,sizeof(nonce),"%08lx%08lx%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random());setupNonce=nonce;snprintf(otaBootSession,sizeof(otaBootSession),"%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random());lastCommand=prefs.getString("command");

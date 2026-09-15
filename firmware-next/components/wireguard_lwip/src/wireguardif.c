@@ -801,8 +801,8 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
 
 	uint8_t type = wireguard_get_message_type(data, len);
 
-	// Always log incoming WG packets (critical for debugging handshake issues)
-	printf("[WG_RX] type=%d (%s) len=%u from %s:%u\n",
+	// Packet tracing is opt-in; synchronous USB output can stall the network task.
+	WG_DEBUG("[WG_RX] type=%d (%s) len=%u from %s:%u\n",
 		type,
 		type == 1 ? "INIT" : type == 2 ? "RESP" : type == 3 ? "COOKIE" : type == 4 ? "DATA" : "?",
 		(unsigned)len,
@@ -1227,7 +1227,7 @@ void wireguardif_periodic(struct netif *netif) {
 				wireguardif_send_keepalive(device, peer);
 			}
 			if (should_send_initiation(peer)) {
-				printf("[WG_PERIODIC] Handshake retry wg_idx=%d key=%02x%02x%02x%02x "
+				WG_DEBUG("[WG_PERIODIC] Handshake retry wg_idx=%d key=%02x%02x%02x%02x "
 				       "ip=%s:%u connect_ip=%s:%u active=%d send_hs=%d\n",
 				       x,
 				       peer->public_key[0], peer->public_key[1],
