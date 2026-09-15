@@ -33,6 +33,10 @@ int main() {
   assert(nextCandidate(state, UINT32_MAX - 2) == 3);
   assert(nextCandidate(state, UINT32_MAX - 1) == 2);
   assert(nextCandidate(state, 0) == -1);
+  waitForDisconnect(state, UINT32_MAX - 100);
+  assert(state.phase == Phase::Disconnecting);
+  assert(!disconnectSettled(state, 198));
+  assert(disconnectSettled(state, 199));
   candidateFailed(state, 3);
   assert(state.phase == Phase::Idle && state.retry_delay_ms == 0);
   retryLater(state, 4);
@@ -44,7 +48,7 @@ int main() {
   assert(state.failed_cycles == 255 && state.retry_delay_ms == BACKOFF_MAX_MS);
   assert(!shouldStartCycle(false, false, 59898, UINT32_MAX - 100, BACKOFF_MAX_MS));
   assert(shouldStartCycle(false, false, 59899, UINT32_MAX - 100, BACKOFF_MAX_MS));
-  for (Phase phase : {Phase::Scanning, Phase::Connecting, Phase::Backoff}) {
+  for (Phase phase : {Phase::Scanning, Phase::Connecting, Phase::Disconnecting, Phase::Backoff}) {
     state.phase = phase; state.position = 3; state.failed_cycles = 200; state.retry_delay_ms = 60000;
     cancelForMutation(state, 77);
     assert(state.phase == Phase::Idle && state.position == 0 && state.failed_cycles == 0 && state.phase_started_ms == 77);

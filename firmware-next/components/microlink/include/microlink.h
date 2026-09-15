@@ -360,6 +360,8 @@ bool microlink_tcp_is_connected(const microlink_tcp_socket_t *sock);
  * @brief Close TCP connection and free resources
  */
 void microlink_tcp_close(microlink_tcp_socket_t *sock);
+/* Transfer ownership of the connected BSD socket to the caller. */
+int microlink_tcp_detach_fd(microlink_tcp_socket_t *sock);
 
 #ifdef __cplusplus
 }

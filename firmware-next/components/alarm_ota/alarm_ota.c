@@ -13,6 +13,10 @@
 #include "mbedtls/sha256.h"
 #include <string.h>
 
+#ifndef pdMS_TO_TICKS
+#define pdMS_TO_TICKS(ms) (ms)
+#endif
+
 #define PREFIX_SIZE (sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t))
 #define TOKEN_CAP 256
 
@@ -53,7 +57,7 @@ static bool supported_build(void) {
 
 static esp_err_t lock(void) {
     if (!g.initialized) return ESP_ERR_INVALID_STATE;
-    return xSemaphoreTake(g.mutex, 0) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+    return xSemaphoreTake(g.mutex, pdMS_TO_TICKS(250)) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 static void unlock(void) { xSemaphoreGive(g.mutex); }
 static bool authorized(const void *request) { return g.config.authorize(request, g.config.user_context); }
@@ -454,8 +458,16 @@ esp_err_t alarm_ota_get_status(alarm_ota_status_t *out) {
 esp_err_t alarm_ota_maintenance(void) {
     esp_err_t err = lock(); if (err != ESP_OK) return err;
     if (g.state == ALARM_OTA_RECEIVING) {
-        err = esp_timer_get_time() >= g.deadline_us ? ESP_ERR_TIMEOUT : safe_now();
-        if (err != ESP_OK) discard_transfer();
+        if (esp_timer_get_time() >= g.deadline_us) {
+            err = ESP_ERR_TIMEOUT;
+            discard_transfer();
+        } else {
+            /* A sampled guard can change while the HTTP worker owns the transfer.
+             * Report it, but let the worker's per-write guard make the decision.
+             * This prevents the main loop from silently invalidating the handle
+             * between two otherwise valid chunks. */
+            err = safe_now();
+        }
     }
     unlock(); return err;
 }

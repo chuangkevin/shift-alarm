@@ -5,6 +5,7 @@
 #include "esp_random.h"
 #include <string.h>
 #include <time.h>
+#include <arpa/inet.h>
 /* Only this worker may access the client or persistent identity. HTTP/loop
  * callers enqueue commands and read a bounded cached status copy. */
 static microlink_t *client;
@@ -232,6 +233,17 @@ esp_err_t alarm_tailnet_start(const char *name) {
 esp_err_t alarm_tailnet_get_status(alarm_tailnet_status_t *out) {
     if(!out)return ESP_ERR_INVALID_ARG;
     taskENTER_CRITICAL(&snapshot_lock);*out=snapshot;taskEXIT_CRITICAL(&snapshot_lock);return ESP_OK;
+}
+esp_err_t alarm_tailnet_open_tcp(const char *ipv4,uint16_t port,uint32_t timeout_ms,int *out_fd) {
+    if(!ipv4||!port||!out_fd)return ESP_ERR_INVALID_ARG;
+    *out_fd=-1;struct in_addr address;
+    if(inet_pton(AF_INET,ipv4,&address)!=1)return ESP_ERR_INVALID_ARG;
+    microlink_t *active=client;
+    if(!active||!client_started||!microlink_is_connected(active))return ESP_ERR_INVALID_STATE;
+    microlink_tcp_socket_t *socket=microlink_tcp_connect(active,ntohl(address.s_addr),port,timeout_ms);
+    if(!socket)return ESP_FAIL;
+    int fd=microlink_tcp_detach_fd(socket);if(fd<0)return ESP_FAIL;
+    *out_fd=fd;return ESP_OK;
 }
 esp_err_t alarm_tailnet_reauth(void) {
     if(__atomic_load_n(&initialized,__ATOMIC_ACQUIRE)!=2)return ESP_ERR_INVALID_STATE;

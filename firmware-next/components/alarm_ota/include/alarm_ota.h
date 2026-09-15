@@ -83,8 +83,9 @@ esp_err_t alarm_ota_activate(const void *request_context);
 esp_err_t alarm_ota_discard_staged(const void *request_context);
 esp_err_t alarm_ota_abort(alarm_ota_handle_t handle, const void *request_context);
 esp_err_t alarm_ota_get_status(alarm_ota_status_t *out);
-/* Call periodically (e.g. 1Hz) from a worker independent of upload HTTP handling.
- * Cancels a timed-out/unsafe transfer, without erasing or changing boot selection. */
+/* Call periodically only while no upload worker is active. A deadline expiry
+ * cancels the transfer; sampled guard failures are reported without invalidating
+ * an in-flight handle. Every write and finish still enforce the current guard. */
 esp_err_t alarm_ota_maintenance(void);
 #ifdef __cplusplus
 }

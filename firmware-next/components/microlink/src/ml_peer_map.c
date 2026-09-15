@@ -147,7 +147,24 @@ bool ml_peer_map_update(microlink_t *ml,cJSON *map) {
             if(!newactive){value.action=ML_PEER_REMOVE;if(!enqueue(ml,&value))goto fail_next;}
         }
     }
+    /* Installing every advertised peer can exhaust the ESP32's available
+     * WireGuard peer storage before the backend appears in control-map order.
+     * Always install the configured service peer first on a full rebuild so
+     * backend and OTA traffic cannot be displaced by unrelated tailnet nodes. */
+    cJSON *priority_node=NULL;
+    if(reset&&ml->config.priority_peer_ip) {
+        cJSON_ArrayForEach(node,next) {
+            ml_peer_update_t value;int64_t expiry;
+            if(!compile_node(node,&value,&expiry))goto fail_next;
+            if(value.vpn_ip==ml->config.priority_peer_ip&&(!expiry||time(NULL)<expiry)){
+                priority_node=node;
+                if(!enqueue(ml,&value))goto fail_next;
+                break;
+            }
+        }
+    }
     cJSON_ArrayForEach(node,next) {
+        if(node==priority_node)continue;
         ml_peer_update_t value,old;int64_t expiry,oldexpiry;
         if(!compile_node(node,&value,&expiry))goto fail_next;
         if(expiry&&time(NULL)>=expiry)continue;

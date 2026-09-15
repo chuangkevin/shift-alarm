@@ -10,7 +10,7 @@ static std::string post(std::string extra) {
 }
 int main() {
     assert(!alarm_proxy::remote_path("/schedule"));assert(alarm_proxy::remote_path("/api/import"));assert(alarm_proxy::remote_path("/static/app.js"));
-    assert(!alarm_proxy::remote_path("/"));assert(!alarm_proxy::remote_path("/display"));assert(!alarm_proxy::remote_path("/calendar"));assert(!alarm_proxy::remote_path("/tailnet"));assert(!alarm_proxy::remote_path("/api/local-calendar?month=2026-07"));assert(!alarm_proxy::remote_path("/api/status"));assert(!alarm_proxy::remote_path("/api/device/firmware/test.bin"));
+    assert(!alarm_proxy::remote_path("/"));assert(!alarm_proxy::remote_path("/display"));assert(!alarm_proxy::remote_path("/calendar"));assert(!alarm_proxy::remote_path("/tailnet"));assert(!alarm_proxy::remote_path("/api/local-calendar?month=2026-07"));assert(!alarm_proxy::remote_path("/api/status"));assert(alarm_proxy::remote_path("/api/device/firmware/test.bin"));assert(alarm_proxy::remote_path("/api/device/heartbeat"));assert(alarm_proxy::remote_path("/api/device/update"));
 
     unsigned status=0;
     assert(alarm_proxy::response_status("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n",status)&&status==403);

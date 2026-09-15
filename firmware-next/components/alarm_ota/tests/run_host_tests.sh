@@ -23,6 +23,7 @@ case_dir="$test_dir/store-fault"; mkdir "$case_dir"; ALARM_OTA_TEST_DIR="$case_d
 run_staged observe-recover
 run_empty observe-absent
 run_empty malformed-clear-fail
+run_empty maintenance-guard-sample
 run_staged discard-confirm-fail
 run_staged discard-success
 run_staged flash-fail

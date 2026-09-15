@@ -9,6 +9,7 @@
 namespace wififailover {
 
 constexpr uint32_t CONNECT_TIMEOUT_MS = 20000;
+constexpr uint32_t DISCONNECT_SETTLE_MS = 300;
 constexpr uint32_t BACKOFF_INITIAL_MS = 2000;
 constexpr uint32_t BACKOFF_MAX_MS = 60000;
 
@@ -22,7 +23,7 @@ struct Candidates {
   size_t count = 0;
 };
 
-enum class Phase : uint8_t { Idle, Scanning, Connecting, Backoff };
+enum class Phase : uint8_t { Idle, Scanning, Connecting, Disconnecting, Backoff };
 
 struct State {
   Phase phase = Phase::Idle;
@@ -74,6 +75,14 @@ inline int nextCandidate(State &state, uint32_t now) {
   if (state.position >= state.ordered.count) return -1;
   state.phase = Phase::Connecting; state.phase_started_ms = now;
   return state.ordered.indices[state.position++];
+}
+
+inline void waitForDisconnect(State &state, uint32_t now) {
+  state.phase = Phase::Disconnecting; state.phase_started_ms = now;
+}
+
+inline bool disconnectSettled(const State &state, uint32_t now) {
+  return state.phase == Phase::Disconnecting && elapsed(now, state.phase_started_ms, DISCONNECT_SETTLE_MS);
 }
 
 inline void retryLater(State &state, uint32_t now) {

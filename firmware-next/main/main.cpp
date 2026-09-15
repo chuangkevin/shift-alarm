@@ -469,6 +469,7 @@ void startWifiScan(uint32_t now){
 void connectSavedWifi(size_t index,uint32_t now){
   if(index>=wifiProfiles.count){wifiBackoff(now);return;}
   const auto &profile=wifiProfiles.profiles[index];
+  Serial.printf("WIFI_CONNECT_ATTEMPT index=%u ssid=%s\n",unsigned(index),profile.ssid.c_str());
   WiFi.begin(profile.ssid.c_str(),profile.password.c_str());wifiState.phase=wififailover::Phase::Connecting;wifiState.phase_started_ms=now;connectStarted=now;
 }
 void clearPendingWifi(){pendingPassword.clear();pendingSsid.clear();wifiPendingTrial=false;connecting=false;}
@@ -521,7 +522,11 @@ void serviceWifi(uint32_t now){
     return;
   }
   if(wifiState.phase==wififailover::Phase::Connecting){
-    if(wififailover::elapsed(now,connectStarted,wififailover::CONNECT_TIMEOUT_MS)){WiFi.disconnect(false,false);continueSavedWifi(now);}
+    if(wififailover::elapsed(now,connectStarted,wififailover::CONNECT_TIMEOUT_MS)){Serial.printf("WIFI_CONNECT_TIMEOUT status=%d\n",int(WiFi.status()));WiFi.disconnect(false,false);wififailover::waitForDisconnect(wifiState,now);}
+    return;
+  }
+  if(wififailover::disconnectSettled(wifiState,now)){
+    continueSavedWifi(now);
     return;
   }
   if(wififailover::shouldStartCycle(false,false,now,wifiState.phase_started_ms,wifiState.retry_delay_ms))startWifiScan(now);
@@ -598,7 +603,6 @@ const char *otaLocalReason(){
 }
 const char *otaDownloadReason(){
   const char *local=otaLocalReason();if(strcmp(local,"ready"))return local;
-  if(backendpoll::blocksOta(backendPollState))return "backend-poll-busy";
   alarm_ota_status_t status={};if(alarm_ota_get_status(&status)==ESP_OK&&status.staged_valid)return "staged-update-exists";
   if(!WiFi.isConnected())return "wifi-not-ready";
   alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);
@@ -606,7 +610,7 @@ const char *otaDownloadReason(){
   if(!backendReachableNow(millis()))return "backend-not-reachable";
   return "ready";
 }
-const char *otaInstallReason(){if(!otaReady)return "ota-not-ready";if(otaBusy.load())return "busy";if(backendpoll::blocksOta(backendPollState))return "backend-poll-busy";alarm_ota_status_t status={};if(alarm_ota_get_status(&status)!=ESP_OK||status.marker_fault)return "marker-fault";if(!status.staged_valid)return "no-staged-update";return otaLocalReason();}
+const char *otaInstallReason(){if(!otaReady)return "ota-not-ready";if(otaBusy.load())return "busy";alarm_ota_status_t status={};if(alarm_ota_get_status(&status)!=ESP_OK||status.marker_fault)return "marker-fault";if(!status.staged_valid)return "no-staged-update";return otaLocalReason();}
 constexpr char OTA_MARKER_KEY[]="ota-stage-v1";
 esp_err_t otaMarkerLoad(alarm_ota_staged_record_t *out,void*){nvs_handle_t handle;esp_err_t err=nvs_open_from_partition("alarm_nvs","shift-alarm",NVS_READONLY,&handle);if(err!=ESP_OK)return err;size_t size=sizeof(*out);err=nvs_get_blob(handle,OTA_MARKER_KEY,out,&size);nvs_close(handle);if(err==ESP_ERR_NVS_NOT_FOUND)return ESP_ERR_NOT_FOUND;if(err!=ESP_OK)return err;return size==sizeof(*out)?ESP_OK:ESP_ERR_INVALID_SIZE;}
 esp_err_t otaMarkerStore(const alarm_ota_staged_record_t *record,void*){nvs_handle_t handle;esp_err_t err=nvs_open_from_partition("alarm_nvs","shift-alarm",NVS_READWRITE,&handle);if(err!=ESP_OK)return err;err=nvs_set_blob(handle,OTA_MARKER_KEY,record,sizeof(*record));if(err==ESP_OK)err=nvs_commit(handle);nvs_close(handle);return err;}
@@ -651,24 +655,31 @@ void backendPollWorker(void*){
   for(;;){
     BackendPollExchange *request=nullptr;
     if(xQueueReceive(backendRequestQueue,&request,portMAX_DELAY)!=pdTRUE||!request)continue;
-    if(request->fetch_schedule){
-      HTTPClient schedule;schedule.setConnectTimeout(1500);schedule.setTimeout(2000);
-      const String url=String(request->backend)+"/api/device/schedule";
-      if(schedule.begin(url)){
-        String authorization=String("Bearer ")+request->token;schedule.addHeader("Authorization",authorization);wipeString(authorization);
-        request->schedule_status=schedule.GET();
-        if(request->schedule_status==200)request->schedule_body_valid=boundedHttpBody(schedule,MAX_JSON,request->schedule_body,8000);
-      }
-      schedule.end();
-    }
-    HTTPClient heartbeat;heartbeat.setConnectTimeout(1500);heartbeat.setTimeout(2000);
-    const String url=String(request->backend)+"/api/device/heartbeat";
+    // The native Tailnet path can need tens of seconds for a cold WireGuard
+    // handshake.  Keep the loopback HTTP request alive long enough for that
+    // handshake and establish reachability before downloading the schedule.
+    HTTPClient heartbeat;heartbeat.setConnectTimeout(3000);heartbeat.setTimeout(60000);
+    const String url="http://127.0.0.1/api/device/heartbeat";
+    Serial.printf("BACKEND_POLL_START generation=%lu\n",(unsigned long)request->ticket.request_generation);
+    int heartbeatStatus=0;
     if(heartbeat.begin(url)){
       String authorization=String("Bearer ")+request->token;heartbeat.addHeader("Authorization",authorization);wipeString(authorization);
       heartbeat.addHeader("Content-Type","application/json");
-      request->heartbeat_ok=heartbeat.POST(reinterpret_cast<uint8_t*>(request->heartbeat),strlen(request->heartbeat))==200;
+      heartbeatStatus=heartbeat.POST(reinterpret_cast<uint8_t*>(request->heartbeat),strlen(request->heartbeat));
+      request->heartbeat_ok=heartbeatStatus==200;
     }
     heartbeat.end();
+    Serial.printf("BACKEND_POLL_HEARTBEAT generation=%lu status=%d\n",(unsigned long)request->ticket.request_generation,heartbeatStatus);
+    if(request->heartbeat_ok&&request->fetch_schedule){
+      HTTPClient schedule;schedule.setConnectTimeout(3000);schedule.setTimeout(60000);
+      const String scheduleUrl="http://127.0.0.1/api/device/schedule";
+      if(schedule.begin(scheduleUrl)){
+        String authorization=String("Bearer ")+request->token;schedule.addHeader("Authorization",authorization);wipeString(authorization);
+        request->schedule_status=schedule.GET();
+        if(request->schedule_status==200)request->schedule_body_valid=boundedHttpBody(schedule,MAX_JSON,request->schedule_body,60000);
+      }
+      schedule.end();
+    }
     if(xQueueSend(backendResultQueue,&request,0)!=pdTRUE){backendDroppedGeneration.store(request->ticket.request_generation);secureWipeBackendExchange(request);}
   }
 }
@@ -725,7 +736,7 @@ void otaWorker(void*){
   alarm_ota_handle_t handle=0;HTTPClient h;esp_err_t err=ESP_FAIL;
   do{
     otaStateSet("checking","checking","正在檢查更新版本");
-    h.setConnectTimeout(3000);h.setTimeout(5000);h.begin(backend+"/api/device/update");h.addHeader("Authorization",String("Bearer ")+token);
+    h.setConnectTimeout(3000);h.setTimeout(45000);h.begin("http://127.0.0.1/api/device/update");h.addHeader("Authorization",String("Bearer ")+token);
     otaLastHttpStatus.store(h.GET());if(otaLastHttpStatus.load()!=200){otaStateSet("error","manifest-http","無法取得更新資訊");break;}
     String manifestBody;if(!boundedHttpBody(h,4096,manifestBody,5000)){otaStateSet("error","manifest-body","更新資訊大小無效或傳輸不完整");break;}
     JsonDocument d;if(deserializeJson(d,manifestBody)){otaStateSet("error","manifest-json","更新資訊格式無效");break;}h.end();
@@ -740,7 +751,7 @@ void otaWorker(void*){
     portENTER_CRITICAL(&otaMux);strlcpy(otaBackendLatestVersion,manifest.version,sizeof(otaBackendLatestVersion));portEXIT_CRITICAL(&otaMux);
     otaTotal.store(manifest.size);
     err=alarm_ota_begin(&manifest,&otaSession,&handle);if(err!=ESP_OK){otaStateSet("error",err==ALARM_OTA_ERR_MARKER?"marker-fault":err==ALARM_OTA_ERR_CHARGING_REQUIRED?"charging-required":"guard-rejected",err==ALARM_OTA_ERR_MARKER?"更新記錄狀態不明，已封鎖下載":err==ALARM_OTA_ERR_CHARGING_REQUIRED?"裝置未顯示充電，已拒絕下載":"更新遭拒：請確認版本與排程");break;}
-    const String firmwareUrl=backend+"/api/device/firmware/"+manifest.sha256+".bin";
+    const String firmwareUrl=String("http://127.0.0.1/api/device/firmware/")+manifest.sha256+".bin";
     h.begin(firmwareUrl);h.addHeader("Authorization",String("Bearer ")+token);
     otaLastHttpStatus.store(h.GET());if(otaLastHttpStatus.load()!=200||h.getSize()!=int(manifest.size)){otaStateSet("error","download-http","更新檔大小或回應不正確");break;}
     auto *stream=h.getStreamPtr();uint8_t buffer[4096];size_t received=0;uint8_t reconnects=0;uint32_t started=millis(),lastProgress=started;const char *failure=nullptr;
@@ -781,7 +792,6 @@ void otaStagedRoutes() {
   server.on("/update", HTTP_GET, [] {
     String page=R"HTML(<h1>裝置更新</h1><p>下載與安裝是兩個分開的步驟。完整下載並驗證後，更新會保存在備用分區；下載完成不會重新啟動。</p><div class="upload-box"><strong>供電限制</strong><p>下載與安裝時，裝置都必須由 GPIO38 顯示「充電中」。這是充電狀態，不是可靠的 USB／VBUS 偵測。電池完整充電時即使接著 USB，也可能因未顯示充電而拒絕下載或安裝。</p><p>下載中斷後，同一次開機可安全續傳；若重新開機，部分檔案不會保存，重新開機後會從 0 重新下載。完整且已驗證的更新可在沒有 Wi-Fi、Tailscale 或後端時稍後安裝。</p></div><p>目前版本：<strong id="current-version">讀取中</strong></p><p>最新版本：<strong id="latest-version">尚未檢查</strong></p><p>已下載版本：<strong id="staged-version">沒有</strong></p><p id="status" role="status">正在取得狀態…</p><progress id="progress" max="100" value="0" style="width:100%"></progress><div class="button-row"><button id="download-update" disabled>下載更新</button><button id="install-update" disabled>安裝並重新啟動</button><button id="discard-update" class="secondary" disabled>刪除已下載更新</button></div><p class="help">按鈕只會各送出一次請求；回應不明時先讀取狀態，不會自動重送。</p><a href="/display">返回裝置設定</a><style>.button-row{display:flex;gap:10px;flex-wrap:wrap}.button-row button{flex:1 1 190px}progress{height:18px}@media(max-width:600px){.button-row{display:grid}.button-row button{width:100%}}</style><script>
 const nonce='NONCE',statusEl=document.querySelector('#status'),downloadButton=document.querySelector('#download-update'),installButton=document.querySelector('#install-update'),discardButton=document.querySelector('#discard-update');let currentSession=null,newest=0,nextRequest=0,acceptedRequest=0,mutationPending=false;/* OTA_STATUS_POLICY_START */function recordUpdateFailure(requestId){if(requestId>acceptedRequest)acceptedRequest=requestId}function acceptUpdateStatus(d,requestId){if(requestId<acceptedRequest)return false;if(currentSession===null||d.session!==currentSession){currentSession=d.session;newest=d.sequence;acceptedRequest=requestId;return true}if(d.sequence<newest)return false;newest=d.sequence;acceptedRequest=requestId;return true}/* OTA_STATUS_POLICY_END */const reasons={ready:'可以操作',busy:'更新操作進行中','marker-fault':'更新記錄狀態不明；下載與安裝已封鎖，可嘗試刪除後重新讀取','charging-required':'裝置目前未顯示充電','ota-not-ready':'更新功能尚未就緒','wifi-not-ready':'無線網路尚未連線','tailnet-not-ready':'Tailscale 尚未就緒','backend-not-reachable':'更新後端目前無法連線','clock-not-ready':'裝置尚未校時','alarm-active':'鬧鐘正在響鈴',snoozed:'貪睡提醒尚未結束','schedule-not-ready':'排程尚未就緒','alarm-near':'五分鐘內有鬧鐘','no-staged-update':'沒有已下載更新','staged-update-exists':'請先安裝或刪除已下載更新'};async function refresh(){const requestId=++nextRequest;try{const r=await fetch('/api/update',{headers:{'X-Setup-Nonce':nonce},cache:'no-store'});const d=await r.json();if(!acceptUpdateStatus(d,requestId))return;document.querySelector('#current-version').textContent=d.currentVersion;document.querySelector('#latest-version').textContent=d.latestVersion||'尚未檢查';document.querySelector('#staged-version').textContent=d.staged?d.staged.version:'沒有';downloadButton.disabled=mutationPending||d.busy||!d.canDownload;installButton.disabled=mutationPending||d.busy||!d.canInstall;discardButton.disabled=mutationPending||d.busy||(!d.staged&&!d.markerFault);const percent=d.total?Math.floor(d.received*100/d.total):0;document.querySelector('#progress').value=percent;statusEl.textContent=d.message+'；下載：'+(reasons[d.downloadReason]||d.downloadReason)+'；安裝：'+(reasons[d.installReason]||d.installReason)+(d.total?'（'+d.received+' / '+d.total+' 位元組，'+percent+'%）':'');}catch(e){recordUpdateFailure(requestId);statusEl.textContent='裝置連線中斷；保留上次顯示，稍後只重新讀取狀態。'}}async function mutate(path){if(mutationPending)return;mutationPending=true;downloadButton.disabled=installButton.disabled=discardButton.disabled=true;try{const r=await fetch(path,{method:'POST',headers:{'X-Setup-Nonce':nonce}});statusEl.textContent=await r.text();}catch(e){statusEl.textContent='請求結果不明；不會自動重送，請等待唯讀狀態更新。'}finally{mutationPending=false;setTimeout(refresh,500)}}downloadButton.onclick=()=>mutate('/api/update/download');installButton.onclick=()=>mutate('/api/update/install');discardButton.onclick=()=>mutate('/api/update/discard');refresh();setInterval(refresh,2000);
-reasons['backend-poll-busy']='後端同步即將完成，請稍候再試';
 </script>)HTML";
     page.replace("NONCE", setupNonce);
     server.send(200, "text/html; charset=utf-8", devicePage(page));
@@ -850,7 +860,7 @@ void routes() {
   });
   const char *headers[]={"Authorization","X-Setup-Nonce"}; server.collectHeaders(headers,2);tailnetRoutes();otaStagedRoutes();localCalendarRoutes();
   server.on("/api/clock",HTTP_GET,[]{JsonDocument d;d["ready"]=clockValid();d["last_sync"]=lastNetworkClock.load();d["interval_seconds"]=CLOCK_SYNC_INTERVAL_MS/1000;d["overdue"]=lastNetworkClock.load()?millis()-lastNetworkClockMs.load()>CLOCK_SYNC_INTERVAL_MS+300000:millis()-bootMs>120000;String out;serializeJson(d,out);server.send(200,"application/json",out);});
-  server.on("/api/status",HTTP_GET,[]{ JsonDocument d; d["version"]=VERSION;d["displaySettingsValid"]=displaySettingsValid;alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);d["tailnetLifecycle"]=tail.lifecycle==ALARM_TAILNET_QUEUED?"queued":tail.lifecycle==ALARM_TAILNET_STARTING?"starting":tail.lifecycle==ALARM_TAILNET_RUNNING?"running":tail.lifecycle==ALARM_TAILNET_RETRY_WAIT?"retry_wait":tail.lifecycle==ALARM_TAILNET_LIFECYCLE_BLOCKED?"blocked":"off";d["tailnetLifecycleLabel"]=tailnetLifecycleLabel(tail.lifecycle);d["tailnetRetryCount"]=tail.retry_count;d["backendTransport"]=backend=="http://100.126.226.79:8237"?"tailscale":"unsupported";d["backendHost"]=backend=="http://100.126.226.79:8237"?"100.126.226.79":"";const uint32_t nowMs=millis();d["backendReachable"]=backendReachableNow(nowMs);if(backendHasSuccess.load())d["backendLastSuccessAgeSeconds"]=(nowMs-backendLastSuccessMs.load())/1000;else d["backendLastSuccessAgeSeconds"]=nullptr;int percent=0;uint32_t age=0;JsonObject battery=d["battery"].to<JsonObject>();battery["schema"]=1;battery["valid"]=battery::value(batteryState,millis(),percent,age);if(battery["valid"].as<bool>()){battery["percent"]=percent;battery["sample_age_seconds"]=age;}else{battery["percent"]=nullptr;battery["sample_age_seconds"]=nullptr;}if(chargingInputValid)battery["charging"]=charging.load();else battery["charging"]=nullptr;d["localSchedule"]=localSchedule;d["firstConsecutiveOnly"]=firstConsecutiveOnly;d["rotation"]=displayRotation*90;d["screenTimeoutMinutes"]=screenTimeoutMinutes;d["screenBrightness"]=screenBrightness;d["screenAwake"]=screenAwake; d["revision"]=revision;d["clockReady"]=clockValid();d["epoch"]=time(nullptr);d["ringing"]=ringing;d["wifi"]=WiFi.isConnected();d["alarmCount"]=alarms.size();d["sync"]=syncState;String out;serializeJson(d,out);server.send(200,"application/json",out); });
+  server.on("/api/status",HTTP_GET,[]{ JsonDocument d; d["version"]=VERSION;d["displaySettingsValid"]=displaySettingsValid;alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);d["tailnetLifecycle"]=tail.lifecycle==ALARM_TAILNET_QUEUED?"queued":tail.lifecycle==ALARM_TAILNET_STARTING?"starting":tail.lifecycle==ALARM_TAILNET_RUNNING?"running":tail.lifecycle==ALARM_TAILNET_RETRY_WAIT?"retry_wait":tail.lifecycle==ALARM_TAILNET_LIFECYCLE_BLOCKED?"blocked":"off";d["tailnetLifecycleLabel"]=tailnetLifecycleLabel(tail.lifecycle);d["tailnetRetryCount"]=tail.retry_count;backendendpoint::Endpoint backendInfo;const bool nativeBackend=backendendpoint::parse(backend.c_str(),backendInfo);d["backendTransport"]=nativeBackend?"tailscale":"unsupported";d["backendHost"]=nativeBackend?backendInfo.host:"";const uint32_t nowMs=millis();d["backendReachable"]=backendReachableNow(nowMs);if(backendHasSuccess.load())d["backendLastSuccessAgeSeconds"]=(nowMs-backendLastSuccessMs.load())/1000;else d["backendLastSuccessAgeSeconds"]=nullptr;int percent=0;uint32_t age=0;JsonObject battery=d["battery"].to<JsonObject>();battery["schema"]=1;battery["valid"]=battery::value(batteryState,millis(),percent,age);if(battery["valid"].as<bool>()){battery["percent"]=percent;battery["sample_age_seconds"]=age;}else{battery["percent"]=nullptr;battery["sample_age_seconds"]=nullptr;}if(chargingInputValid)battery["charging"]=charging.load();else battery["charging"]=nullptr;d["localSchedule"]=localSchedule;d["firstConsecutiveOnly"]=firstConsecutiveOnly;d["rotation"]=displayRotation*90;d["screenTimeoutMinutes"]=screenTimeoutMinutes;d["screenBrightness"]=screenBrightness;d["screenAwake"]=screenAwake; d["revision"]=revision;d["clockReady"]=clockValid();d["epoch"]=time(nullptr);d["ringing"]=ringing;d["wifi"]=WiFi.isConnected();d["alarmCount"]=alarms.size();d["sync"]=syncState;String out;serializeJson(d,out);server.send(200,"application/json",out); });
   server.on("/display",HTTP_GET,[]{
     String page=String("<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>裝置設定</title><style>body{font:20px system-ui;padding:24px}button,select{font:20px system-ui;padding:12px;margin:12px 0}</style><h1>裝置設定</h1><a class='primary-link' href='/calendar'>設定班表與鬧鐘</a><h2>螢幕</h2><form method='post' action='/display'><input type='hidden' name='nonce' value='")+setupNonce+"'><label for='rotation'>顯示方向</label><select id='rotation' name='rotation'>";
     for(int r=0;r<4;r++)page+=String("<option value='")+r+"'"+(displayRotation==r?" selected":"")+">"+r*90+"°"+(r==0?"（正常）":r==2?"（上下顛倒）":"")+"</option>";
@@ -939,16 +949,23 @@ void setup() {
   Serial.begin(115200);ESP_ERROR_CHECK(nvs_flash_init());if(psramFound())heap_caps_malloc_extmem_enable(4096); esp_err_t nvs=nvs_flash_init_partition("alarm_nvs");ESP_ERROR_CHECK(nvs);if(!prefs.begin("shift-alarm",false,"alarm_nvs")){Serial.println("SETTINGS_STORAGE_FAILED");abort();}
   char nonce[33];snprintf(nonce,sizeof(nonce),"%08lx%08lx%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random());setupNonce=nonce;snprintf(otaBootSession,sizeof(otaBootSession),"%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random());lastCommand=prefs.getString("command");
   handled=prefs.getLong64("handled",0);snooze=prefs.getLong64("snooze",0);
-  #ifdef PROVISION_BACKEND
-  if(prefs.getString("backend").isEmpty()||prefs.getString("token").isEmpty()){
-    if(prefs.putString("token",PROVISION_TOKEN)!=strlen(PROVISION_TOKEN)||
-       prefs.putString("manage",PROVISION_MANAGE)!=strlen(PROVISION_MANAGE)||
-       prefs.putString("backend",PROVISION_BACKEND)!=strlen(PROVISION_BACKEND)||
-       prefs.getString("token")!=PROVISION_TOKEN||prefs.getString("backend")!=PROVISION_BACKEND)abort();
-  }
+#ifdef PROVISION_BACKEND
+  /* A replacement board may contain an old device credential in NVS.  The
+   * private production provisioning header is authoritative for this unit;
+   * rotate only mismatched values so ordinary boots do not rewrite flash. */
+  if(prefs.getString("token")!=PROVISION_TOKEN&&
+     (prefs.putString("token",PROVISION_TOKEN)!=strlen(PROVISION_TOKEN)||prefs.getString("token")!=PROVISION_TOKEN))abort();
+  if(prefs.getString("backend").isEmpty()&&
+     (prefs.putString("backend",PROVISION_BACKEND)!=strlen(PROVISION_BACKEND)||prefs.getString("backend")!=PROVISION_BACKEND))abort();
+  if(prefs.getString("manage").isEmpty()&&prefs.putString("manage",PROVISION_MANAGE)!=strlen(PROVISION_MANAGE))abort();
 #endif
   if(!loadWifiProfiles()){setupFailed=true;}
-  backend=prefs.getString("backend");if(backend=="http://192.168.18.31:8237"){backend="http://100.126.226.79:8237";prefs.putString("backend",backend);}token=prefs.getString("token");manageUrl=prefs.getString("manage");
+  backend=prefs.getString("backend");
+  if(backend=="http://192.168.18.31:8237"||backend=="http://192.168.18.31:8238"||backend=="http://100.126.226.79:8237"||backend=="http://100.126.226.79:8238"){
+    backend="http://100.127.82.47:8237";
+    if(prefs.putString("backend",backend)!=backend.length()||prefs.getString("backend")!=backend)abort();
+  }
+  token=prefs.getString("token");manageUrl=prefs.getString("manage");
   apPassword=prefs.getString("ap-pass");if(apPassword.isEmpty()){char b[13];snprintf(b,sizeof(b),"%08lx%04lx",(unsigned long)esp_random(),(unsigned long)(esp_random()&0xffff));apPassword=b;prefs.putString("ap-pass",apPassword);}
   uint8_t staMac[6]={};ESP_ERROR_CHECK(esp_read_mac(staMac,ESP_MAC_WIFI_STA));char apSuffix[5];deviceidentity::suffix(staMac,apSuffix);apName=String("ShiftAlarm-")+apSuffix;
   scheduleStorageFault.store(scheduleFaultMarker(false));String err;String stored=savedSchedule();savedScheduleRestored=!scheduleStorageFault.load()&&(!prefs.isKey("schedule")||(!stored.isEmpty()&&applySchedule(stored,false,err)));if(scheduleStorageFault.load())syncState="班表儲存狀態不明；重開前請勿修改";
@@ -979,7 +996,7 @@ void loop() {
   sampleBattery(millis());
   if(!tailnetStarted&&WiFi.isConnected()&&clockValid()&&millis()-tailnetAttempt>=30000){tailnetAttempt=millis();if(alarm_tailnet_start(apName.c_str())==ESP_OK)tailnetStarted=true;}
   if(!proxyStarted){if(alarm_proxy_start()==ESP_OK)proxyStarted=true;}
-  refreshOtaGuard();if(otaReady)alarm_ota_maintenance();
+  refreshOtaGuard();if(otaReady&&!otaBusy.load())alarm_ota_maintenance();
   server.handleClient();if(portal)dns.processNextRequest();uint32_t ms=millis();time_t now=time(nullptr);
   serviceWifi(ms);
   if(portal&&apCloseAt&&int32_t(ms-apCloseAt)>=0)closePortal();

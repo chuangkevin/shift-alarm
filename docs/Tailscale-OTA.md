@@ -21,9 +21,9 @@ python3 deploy/ota_tailnet.py --device http://裝置-Tailscale-IP
 ```sh
 python3 deploy/ota_tailnet.py \
   --device http://裝置-Tailscale-IP \
-  --backend http://100.126.226.79:8237 \
+  --backend http://100.127.82.47:8237 \
   --token-file /私有路徑/device-token.txt \
-  --version 0.3.13 --download --wait-seconds 900
+  --version 新版本 --download --wait-seconds 900
 ```
 
 下載完成後不會重開。完整大小、stream SHA-256、`esp_ota_end` 與 image descriptor 通過後，裝置把小型 authenticated marker 寫入既有 `alarm_nvs`。映像留在 inactive OTA slot，不把 binary 放進 NVS。
@@ -33,7 +33,7 @@ python3 deploy/ota_tailnet.py \
 ```sh
 python3 deploy/ota_tailnet.py \
   --device http://裝置-Tailscale-IP \
-  --version 0.3.13 --install --wait-seconds 900
+  --version 新版本 --install --wait-seconds 900
 ```
 
 安裝會重新驗 manifest/marker HMAC，從 partition table 推導 inactive slot，確認 marker target 相符且不是 running slot，從 flash 重讀完整映像計算 SHA-256，重讀 board/version descriptor，並在驗證期間及 boot selection 前重查充電、時鐘、排程與鬧鐘 guard。清除 marker 成功後才選擇 boot partition。若 boot selection 失敗，裝置留在目前版本並要求重新下載。
@@ -69,4 +69,4 @@ sh firmware-next/components/alarm_ota/tests/run_host_tests.sh
 python3 firmware-next/components/alarm_ota/tests/test_manifest_contract.py
 ```
 
-第二台實機目前安裝 0.3.16；0.3.17 已有來源碼、host tests、credential-free build 與發布映像，但尚未安裝到任何裝置。GPIO38 真實行為、四組 Wi-Fi failover、240×240 實體畫面與按鍵、real-flash staged image、跨重開保存、離線安裝及 live OTA，仍未完成整套硬體／實際網路驗收；不得把 host 結果或已發布映像記成硬體完成。
+2026-09-15，裝置 `100.104.66.47` 已從 0.3.20 經原生 Tailscale 升級到 0.3.21。1,653,056-byte 映像完整下載並由裝置驗證後，另一次 install POST 完成切換、重開與回連；方向 90°、亮度 25%、關屏 5 分鐘、班表 revision、5 個鬧鐘及 Wi-Fi／Tailnet 身分均保留。更新狀態回到 `idle`，後端健康檢查回覆 200。第一次 install POST 在 HTTP 逾時前未被接受；唯讀狀態證明裝置仍為 0.3.20、staged sequence 未變且 `canInstall=true` 後，才由人工作出第二次送出決定。工具不得自行重試。

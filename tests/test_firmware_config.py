@@ -91,9 +91,9 @@ def test_reliability_contract_and_versions_are_wired():
     assert "displaySettingsValid" in source
     assert "settingsLoadValid" in source
     assert "ota_manifest::available" in source
-    assert 'set(PROJECT_VER "0.3.17")' in Path("firmware-next/CMakeLists.txt").read_text()
+    assert 'set(PROJECT_VER "0.3.21")' in Path("firmware-next/CMakeLists.txt").read_text()
     ota_fixture = Path("firmware-next/components/alarm_ota/tests/test_real_component.c").read_text()
-    assert ota_fixture.count('version="0.3.17"') == 2
+    assert ota_fixture.count('version="0.3.21"') == 2
     assert 'version="0.3.12"' not in ota_fixture
     assert "VERSION = '0.1.6'" in Path("app.py").read_text()
 
@@ -182,9 +182,11 @@ def test_schedule_worker_and_ota_poll_gate_are_integrated():
     routes = Path("firmware-next/main/local_calendar_routes.h").read_text()
     page = Path("firmware-next/main/calendar_page.h").read_text()
     worker = source.split("void scheduleWorker(", 1)[1].split("bool initScheduleWorker", 1)[0]
-    assert 'return "backend-poll-busy"' in source
-    assert source.count("backendpoll::blocksOta(backendPollState)") == 2
-    assert "後端同步即將完成，請稍候再試" in source
+    assert 'return "backend-poll-busy"' not in source
+    assert "backendpoll::blocksOta(backendPollState)" not in source
+    assert source.index('const String url="http://127.0.0.1/api/device/heartbeat"') < source.index('const String scheduleUrl="http://127.0.0.1/api/device/schedule"')
+    assert "request->heartbeat_ok&&request->fetch_schedule" in source
+    assert source.count("setTimeout(60000)") >= 2
     assert "schedulecandidate::parse" in worker
     assert "scheduleNvsWriteExact" in worker
     assert "nvs_open_from_partition" in source

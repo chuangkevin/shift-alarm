@@ -42,7 +42,7 @@ bool response_status(const std::string &input, unsigned &status) {
 }
 bool remote_path(const std::string &target){
  const auto path=target.substr(0,target.find('?'));
- return path.compare(0,8,"/static/")==0||path=="/api/health"||path=="/api/state"||path=="/api/import"||path=="/api/settings"||path=="/api/months"||path=="/api/qr.svg"||path=="/api/test-alarm"||path=="/api/device/stop";
+ return path.compare(0,8,"/static/")==0||path.compare(0,12,"/api/device/")==0||path=="/api/health"||path=="/api/state"||path=="/api/import"||path=="/api/settings"||path=="/api/months"||path=="/api/qr.svg"||path=="/api/test-alarm";
 }
 bool rewrite_request(const std::string &input, const std::string &lan,
                      const std::string &backend, Request &out) {

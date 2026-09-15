@@ -22,7 +22,7 @@ def tailnet_url(value):
         raise ValueError('Require literal Tailscale IPv4 URL') from None
     if (u.scheme != 'http' or address not in ipaddress.ip_network('100.64.0.0/10')
             or u.username or u.password or u.path not in ('', '/') or u.query or u.fragment
-            or port not in (None, 80, 8237)):
+            or port not in (None, 80, 8237, 8238)):
         raise ValueError('Require direct Tailscale HTTP URL; no LAN, DNS, proxy or redirect')
     return value.rstrip('/')
 

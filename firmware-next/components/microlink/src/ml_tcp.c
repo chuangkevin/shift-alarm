@@ -284,3 +284,12 @@ void microlink_tcp_close(microlink_tcp_socket_t *sock) {
     sock->connected = false;
     free(sock);
 }
+
+int microlink_tcp_detach_fd(microlink_tcp_socket_t *sock) {
+    if (!sock || !sock->connected || sock->fd < 0) return -1;
+    int fd = sock->fd;
+    sock->fd = -1;
+    sock->connected = false;
+    free(sock);
+    return fd;
+}

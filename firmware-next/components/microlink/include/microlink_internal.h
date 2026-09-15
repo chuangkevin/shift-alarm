@@ -75,7 +75,7 @@ extern "C" {
 #define ML_DERP_MAX_FRAME       (ML_MAX_PACKET_SIZE + 64)
 
 /* DERP */
-#define ML_DERP_REGION          9       /* Dallas (dfw) */
+#define ML_DERP_REGION          20      /* Hong Kong (hkg), closest stable relay for this deployment */
 #define ML_DERP_HOST            "derp9e.tailscale.com"
 #define ML_DERP_PORT            443
 

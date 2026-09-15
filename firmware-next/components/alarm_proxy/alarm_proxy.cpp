@@ -1,4 +1,5 @@
 #include "alarm_proxy.h"
+#include "alarm_tailnet.h"
 #include "proxy_http.h"
 #include <atomic>
 #include <cerrno>
@@ -58,6 +59,11 @@ std::string ip_string(uint32_t addr) {
 int connect_upstream(const Session &s,bool local) {
     sockaddr_in destination=upstream;
     if(local){destination.sin_addr.s_addr=htonl(INADDR_LOOPBACK);destination.sin_port=htons(8081);}
+    if(!local){
+        int fd=-1;const std::string ip=ip_string(destination.sin_addr.s_addr);
+        if(alarm_tailnet_open_tcp(ip.c_str(),ntohs(destination.sin_port),60000,&fd)!=ESP_OK)return -1;
+        timeouts(fd);return fd;
+    }
     int fd=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(fd<0)return -1;
     int flags=fcntl(fd,F_GETFL,0);fcntl(fd,F_SETFL,flags|O_NONBLOCK);
     int result=connect(fd,reinterpret_cast<const sockaddr*>(&destination),sizeof(destination));
@@ -181,6 +187,7 @@ bool sta(esp_netif_ip_info_t &ip) {
     return net && esp_netif_is_netif_up(net) && esp_netif_get_ip_info(net,&ip)==ESP_OK && ip.ip.addr && ip.netmask.addr;
 }
 bool accepted_peer(uint32_t destination,uint32_t source){
+ if((ntohl(destination)>>24)==127&&(ntohl(source)>>24)==127)return true;
  for(const char *key:{"WIFI_STA_DEF","WIFI_AP_DEF"}){
   auto *net=esp_netif_get_handle_from_ifkey(key);esp_netif_ip_info_t ip{};
   if(net&&esp_netif_is_netif_up(net)&&esp_netif_get_ip_info(net,&ip)==ESP_OK&&ip.ip.addr==destination&&ip.netmask.addr)

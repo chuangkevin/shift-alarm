@@ -45,6 +45,10 @@ typedef struct {
 } alarm_tailnet_status_t;
 esp_err_t alarm_tailnet_start(const char *device_name);
 esp_err_t alarm_tailnet_get_status(alarm_tailnet_status_t *out);
+/* Open a BSD TCP socket through the native WireGuard path. The call triggers
+ * the peer handshake before connect; caller owns and closes the returned fd. */
+esp_err_t alarm_tailnet_open_tcp(const char *ipv4, uint16_t port,
+                                 uint32_t timeout_ms, int *out_fd);
 /* Starts a new interactive followup. Preserves persistent device identity. */
 esp_err_t alarm_tailnet_reauth(void);
 /* ESP_OK means request queued; observe status for completion/errors.
