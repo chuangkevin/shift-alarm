@@ -90,7 +90,7 @@ def test_reliability_contract_and_versions_are_wired():
     assert "displaySettingsValid" in source
     assert "settingsLoadValid" in source
     assert "ota_manifest::available" in source
-    assert 'set(PROJECT_VER "0.3.11")' in Path("firmware-next/CMakeLists.txt").read_text()
+    assert 'set(PROJECT_VER "0.3.12")' in Path("firmware-next/CMakeLists.txt").read_text()
     assert "VERSION = '0.1.5'" in Path("app.py").read_text()
 
 
@@ -125,3 +125,55 @@ def test_physical_menu_draw_and_gpio_are_integrated():
     assert 'http://' not in main_draw
     assert 'alarm_tailnet_get_status' not in main_draw
     assert 'alarms.size()' not in main_draw
+
+
+def test_multi_wifi_source_contract_is_wired_and_redacted():
+    source = Path("firmware-next/main/main.cpp").read_text()
+    profiles = Path("firmware-next/main/wifi_profiles.h").read_text()
+    failover = Path("firmware-next/main/wifi_failover_policy.h").read_text()
+    page = Path("firmware-next/main/wifi_page.h").read_text()
+    assert 'WIFI_PROFILE_SLOT_KEYS[2][10]={"wifi-v2-a","wifi-v2-b"}' in source
+    assert 'WIFI_PROFILE_SELECTOR_KEY[]="wifi-v2-sel"' in source
+    assert 'nvs_open_from_partition("alarm_nvs","shift-alarm",NVS_READONLY,&handle)' in source
+    assert 'nvs_open_from_partition("alarm_nvs","shift-alarm",NVS_READWRITE,&handle)' in source
+    assert 'nvs_get_blob(handle,key,nullptr,&stored)' in source
+    assert 'if(result==ESP_ERR_NVS_NOT_FOUND)' in source
+    assert 'nvs_set_blob(handle,key,data,length)' in source
+    assert 'nvs_commit(handle)' in source
+    assert 'nvs_close(handle)' in source
+    storage_adapter = source.split('class WifiNvsStorage', 1)[1].split('WifiNvsStorage wifiStorage', 1)[0]
+    assert 'prefs.isKey' not in storage_adapter
+    assert 'prefs.getBytesLength' not in storage_adapter
+    assert storage_adapter.count('nvs_get_blob(') == 2
+    migration = source.split('wifiprofiles::List migrated', 1)[1].split('String currentWifiSsid', 1)[0]
+    assert migration.index('persistWifiProfiles(migrated,committed)') < migration.index('prefs.remove(WIFI_CREDENTIALS_KEY)')
+    assert 'WiFi.scanNetworks(true,true)' in source
+    wifi_setup = source.split('setenv("TZ","CST-8",1)', 1)[1].split('routes();', 1)[0]
+    assert wifi_setup.index('WiFi.persistent(false)') < wifi_setup.index('WiFi.mode(WIFI_STA)')
+    assert 'WiFi.setAutoReconnect(false)' in source
+    assert 'wififailover::CONNECT_TIMEOUT_MS' in source
+    assert 'constexpr size_t MAX_PROFILES = 4' in profiles
+    assert 'constexpr uint8_t SCHEMA = 3' in profiles
+    assert 'checksum(' in profiles
+    assert 'secureWipe(' in profiles
+    assert 'volatile uint8_t *bytes' in profiles
+    assert 'CommittedStorageFault' in profiles
+    assert 'storage.writeSlot(inactive' in profiles
+    assert profiles.index('storage.writeSlot(inactive') < profiles.index('storage.writeSelector(')
+    assert profiles.index('storage.writeSelector(') < profiles.index('storage.eraseSlot(current->slot)')
+    assert 'BACKOFF_MAX_MS = 60000' in failover
+    assert 'if (state.failed_cycles < UINT8_MAX)' in failover
+    assert 'WiFi.scanDelete();WiFi.disconnect(false,false);clearPendingWifi();wififailover::cancelForMutation' in source
+    assert 'write(key,zeros,length)' in source
+    assert 'pendingPassword.clear();pendingSsid.clear()' in source
+    remove_route = source.split('server.on("/api/wifi/remove",HTTP_POST', 1)[1].split('server.on("/api/schedule"', 1)[0]
+    assert remove_route.index('cancelWifiSelection(now)') < remove_route.index('persistWifiProfiles(next,committed)')
+    assert remove_route.index('persistWifiProfiles(next,committed)') < remove_route.index('wifiProfiles=next')
+    assert source.count('server.on("/api/wifi/remove",HTTP_POST') == 1
+    assert 'server.on("/api/wifi/remove",HTTP_GET' not in source
+    assert 'profile["password"]' not in source
+    assert 'profile["hash"]' not in source
+    assert 'profile["token"]' not in source
+    assert '已保存 Wi-Fi' in page
+    assert 'min-height:44px' in page
+    assert 'confirm(' not in page and 'alert(' not in page

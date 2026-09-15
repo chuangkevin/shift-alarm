@@ -14,12 +14,13 @@ AI 接手規則見 `AGENTS.md`，完整現況見 `docs/AI接手開發.md`。以�
 - [x] 0.3.8 已安全寫入非執行中分區並完成實機驗收：跨月連續上班抑制、外框顯示、每筆時間獨立開關、持續心跳、儲存班表堆疊修正、持久亮度設定，以及依臺北時間顯示今天的紅點與細紅框。今天標記每分鐘原地更新，不會清除日期按鈕焦點。OTA Range 續傳只有 host 測試，待下一次實機 OTA 驗收。
 - [x] 後端 0.1.2 已部署；Gemini `max_tokens` 預設 6000 且強制不低於 400。
 - [x] 後端 0.1.4 與 GN100 Caddy 離線 fallback 已於 2026-09-15 部署；健康檢查與在線網域回應 200。
-- [ ] 韌體 0.3.11 原始碼已完成兩階段 staged OTA、GPIO38 fail-closed 充電 gate、240×240 主畫面、六項選單、三鍵狀態機、STA MAC 尾碼與 host 測試；實機仍是 0.3.8，需第二台裝置 USB bootstrap 後驗證。
+- [ ] 韌體 0.3.12 原始碼已在 0.3.11 實體 UI 基礎加入最多四組 Wi-Fi、斷線 failover、管理頁與 host 測試；實機仍是 0.3.8，需第二台裝置 USB bootstrap 後驗證。
 
 ## 目前可接續工作
 
 - [ ] 實機驗證 ADC2 channel 6 曲線、GPIO38 active-high 充電狀態及充滿後 fail-closed 拒絕行為。
 - [ ] 第二台裝置實機驗證 240×240 主畫面、六項選單、QR、四方向、按鍵 debounce／長按／配網 chord、響鈴優先及 15 秒返回。
+- [ ] 第二台裝置實機驗證四組 Wi-Fi 遷移、加入／更新／移除、最強訊號選擇、hidden fallback、斷線退避、AP 持續可用與 IP 變更提示。
 - [ ] 實機驗證完整 staged image 跨重開保存、部分下載重開從 0、斷網離線安裝及 marker lifecycle。
 - [ ] 用真實中斷完成 HTTP Range 續傳、live OTA 與線上入口 `/device-offline`；在完成前不部署。
 
@@ -33,5 +34,5 @@ AI 接手規則見 `AGENTS.md`，完整現況見 `docs/AI接手開發.md`。以�
 - Tailscale 裝置 IP 可能在重新授權後改變；每次部署都要從即時狀態取得。
 - 0.3.3 下載曾在 666,392 / 1,569,792 位元組停滯後安全中止。0.3.8 以 USB 僅寫入非執行中 app0 與單一 OTA 選擇 sector，未改 NVS、bootloader 或分區表；Range 續傳仍須在下一次實機 OTA 驗收。
 - 0.3.8 對 1,617,664-byte 映像的兩次明確單次下載，分別在 1,309,111 與 356,671 bytes 停止；後端 0.1.4 paced stream 部署後，第三次 POST 在開始前被斷線，裝置狀態未重置。三次均未完成，裝置保持 0.3.8 與原設定；停止 OTA 重送，改走 USB bootstrap。
-- 第四次由 GN100 送出控制請求後，0.3.8 在 760,496 bytes 停止；後端 0.1.5 改為 4 KiB 連續串流後，第五次仍在 358,736 bytes 停止。server 端三種 chunk 策略均重現裝置端 `read()==0` 即中止；停止 OTA 重送，唯一下一步是第二台裝置以 Mac USB 資料線 bootstrap 0.3.11。
-- 0.3.11 的 GPIO38 gate、staged flash、離線安裝、實體 TFT 排版與按鍵、真實 Range reconnect 與 live OTA 尚未在硬體／實際網路驗證。原始碼、host 測試或建置通過不代表已部署。
+- 第四次由 GN100 送出控制請求後，0.3.8 在 760,496 bytes 停止；後端 0.1.5 改為 4 KiB 連續串流後，第五次仍在 358,736 bytes 停止。server 端三種 chunk 策略均重現裝置端 `read()==0` 即中止；停止 OTA 重送，唯一下一步是第二台裝置以 Mac USB 資料線 bootstrap 目前候選 0.3.12。
+- 0.3.12 的 GPIO38 gate、staged flash、離線安裝、實體 TFT 排版與按鍵、四組 Wi-Fi failover、真實 Range reconnect 與 live OTA 尚未在硬體／實際網路驗證。原始碼、host 測試或建置通過不代表已部署。

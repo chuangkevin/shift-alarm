@@ -1,0 +1,23 @@
+'use strict';
+const fs = require('fs');
+const assert = require('assert');
+const main = fs.readFileSync('firmware-next/main/main.cpp', 'utf8');
+const page = fs.readFileSync('firmware-next/main/wifi_page.h', 'utf8');
+
+assert(main.includes('server.on("/api/wifi/remove",HTTP_POST'));
+assert(!main.includes('server.on("/api/wifi/remove",HTTP_GET'));
+assert.strictEqual((main.match(/server\.on\("\/api\/wifi\/remove",HTTP_POST/g) || []).length, 1);
+assert(main.includes('profile["ssid"]'));
+assert(main.includes('d["storageFault"]=wifiStorageFault'));
+for (const forbidden of ['profile["password"]', 'profile["hash"]', 'profile["token"]']) assert(!main.includes(forbidden));
+assert(page.includes('已保存 Wi-Fi'));
+assert(page.includes('min-height:44px'));
+assert(page.includes('@media(max-width:767px)'));
+assert(page.includes('@media(min-width:768px) and (max-width:1023px)'));
+assert(!page.includes('confirm('));
+assert(!page.includes('alert('));
+assert.strictEqual((page.match(/fetch\('\/api\/wifi\/remove'/g) || []).length, 1);
+assert(page.includes('取得新的 IP'));
+assert(main.includes('String("<style></style><h1>班表鬧鐘配網'));
+assert(main.includes('String("目前網路：")+currentWifiSsid()'));
+assert(main.includes('String("已保存 ")+String(unsigned(wifiProfiles.count))+" 組"'));

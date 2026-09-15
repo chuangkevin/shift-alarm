@@ -4,17 +4,19 @@
 
 ESP32-S3 星智 CUBE 1.54 吋獨立鬧鐘。班表與響鈴設定保存在裝置；手機在裝置網頁編輯月曆，也可經裝置的原生 Tailscale 上傳圖片至私有辨識服務。
 
-新版韌體位於 `firmware-next/`。原始碼版本為 0.3.11，後端／映像版本維持 0.1.5；後端 0.1.5 與 GN100 Caddy 離線 fallback 已於 2026-09-15 部署，實機仍為 0.3.8。0.3.11 包含兩階段 OTA、240×240 主畫面與實體選單。下載與安裝仍只允許 GPIO38 當下有效且 active-high 顯示充電時執行。這是刻意 fail-closed 的充電狀態，不是可靠的 USB／VBUS 偵測；電池充滿時即使接著 USB，也可能拒絕下載或安裝。0.3.8 的舊 OTA 讀取競態無法由 server chunk 策略修復，必須先用 USB 資料線 bootstrap 0.3.11；GPIO38、實體畫面、按鍵、真實 flash marker、離線安裝與新版 live OTA 再由第二台裝置驗證。
+新版韌體位於 `firmware-next/`。原始碼版本為 0.3.12，後端／映像版本維持 0.1.5；後端 0.1.5 與 GN100 Caddy 離線 fallback 已於 2026-09-15 部署，實機仍為 0.3.8。0.3.12 在 0.3.11 的兩階段 OTA、240×240 主畫面與實體選單上，新增最多四組 Wi-Fi 與斷線自動切換。下載與安裝仍只允許 GPIO38 當下有效且 active-high 顯示充電時執行。這是刻意 fail-closed 的充電狀態，不是可靠的 USB／VBUS 偵測；電池充滿時即使接著 USB，也可能拒絕下載或安裝。0.3.8 的舊 OTA 讀取競態無法由 server chunk 策略修復，必須先用 USB 資料線 bootstrap 0.3.12；GPIO38、實體畫面、按鍵、Wi-Fi failover、真實 flash marker、離線安裝與新版 live OTA 再由第二台裝置驗證。
 
 0.2.8 已實測手機經 ESP32 與原生 Tailscale 上傳九月班表，36.851 秒辨識出正確 11 天。升至 0.3.1 後，Wi-Fi、90 度方向、11 筆鬧鐘與班表 revision 均保留。0.2.9 的首次 OTA 下載中止且保留原版本；0.3.0 起已加入十分鐘總期限、三十秒無進度保護與進度回報。0.3.2 已從 0.3.1 經原生 Tailscale 完整 OTA，下載、驗證、重開、回連與保存資料檢查均通過。
 
 ## 第一次使用與換網路
 
 1. 首次開機建立 `ShiftAlarm-XXXX` 熱點並顯示 QR Code；手機加入後開啟 `http://192.168.4.1`。不沿用原廠韌體的 Wi-Fi。
-2. 在裝置頁面掃描、選擇 Wi-Fi 並輸入密碼。連線與設定保存成功才關閉配網熱點；失敗可重試。
+2. 在裝置頁面掃描、選擇 Wi-Fi 並輸入密碼。連線成功後才加入最多四組的保存清單；失敗時保留舊清單並自動恢復連線。
 3. 使用畫面上的裝置網址進入「班表與鬧鐘」。手動設定日期與時間不需要辨識伺服器。
 4. 要使用圖片辨識或下載更新，先在「Tailscale 連線」完成官方授權，並確認裝置能經原生 Tailscale 到達後端。
 5. 更換環境時，同時按住「＋」與「－」十秒，倒數完成後開啟配網；放開會取消。也可從裝置設定重新配網。一般斷網不會自動開放熱點。
+
+Wi-Fi 設定以 `wifi-v2-a`／`wifi-v2-b` 兩個 generation+CRC slot 與 checksummed active selector 保存於 `alarm_nvs`。新 slot 與 selector 都完成 readback 後才套用；selector 結果不明時封鎖修改，reload 只接受 selector 明確授權的 generation。目前硬體政策沒有啟用 NVS 加密，因此 Wi-Fi 密碼是裝置本機 plaintext-at-rest；介面與 API 不回傳密碼、hash 或 token。韌體會明確覆寫可控制的固定 credential buffer、暫存 blob 與舊 slot；HTTP parser／Arduino `String` 的內部配置無法保證完整 heap scrubbing，NVS journal／wear leveling 也無法保證舊 flash page 的物理抹除，因此只縮短生命週期並清除可控制的邏輯紀錄，不宣稱完整清除所有 RAM 或 flash remanence。
 
 裝置不需要與 Pi 或 GN100 位於相同區網。手機到裝置的本地 Wi-Fi 是操作入口；**裝置到辨識／OTA 後端必須使用原生 Tailscale，不得以同區網位址替代驗收或作為備援設計**。
 

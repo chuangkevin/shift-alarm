@@ -1,6 +1,9 @@
 #include "ota_download_policy.h"
 #include "battery_policy.h"
 #include "connectivity_policy.h"
+#include "wifi_profiles.h"
+#include "wifi_failover_policy.h"
+#include "wifi_page.h"
 #include "button_policy.h"
 #include "device_identity.h"
 #include "ui_policy.h"
@@ -55,7 +58,9 @@ std::vector<Alarm> alarms;
 Preferences prefs;
 WebServer server(IPAddress(127,0,0,1),8081);
 DNSServer dns;
-String apName,pendingSsid,pendingPassword,setupNonce;
+String apName,setupNonce;
+wifiprofiles::SensitiveText<wifiprofiles::MAX_SSID_BYTES> pendingSsid;
+wifiprofiles::SensitiveText<wifiprofiles::MAX_PASSWORD_BYTES> pendingPassword;
 bool connecting=false, setupFailed=false, showJoinQr=true;
 uint32_t connectStarted=0,apCloseAt=0;
 String lastCommand;
@@ -69,7 +74,14 @@ std::atomic<bool> backendHasSuccess{false};
 // Prevent Arduino from confirming a pending image before application diagnostics.
 extern "C" bool verifyRollbackLater(){return true;}
 
-String revision, backend, token, manageUrl, ssid, password, apPassword;
+String revision, backend, token, manageUrl, apPassword;
+wifiprofiles::List wifiProfiles;
+wififailover::State wifiState;
+bool wifiPendingTrial=false;
+bool wifiMigrationPending=false;
+uint32_t wifiMigrationAttempt=0;
+wifiprofiles::Selector wifiSelector;
+bool wifiSelectorValid=false,wifiStorageFault=false;
 int64_t handled=0,snooze=0;
 volatile bool ringing=false;
 uint32_t ringStarted=0,lastPoll=0,lastDraw=0,lastSerial=0,bootMs=0;
@@ -176,41 +188,86 @@ void setScreenAwake(bool awake){
 }
 void wakeScreen(){screenLastActivity=millis();setScreenAwake(true);}
 
+constexpr char WIFI_PROFILE_SLOT_KEYS[2][10]={"wifi-v2-a","wifi-v2-b"};
+constexpr char WIFI_PROFILE_SELECTOR_KEY[]="wifi-v2-sel";
 constexpr char WIFI_CREDENTIALS_KEY[]="wifi-v1";
-constexpr size_t WIFI_BLOB_HEADER=5, WIFI_BLOB_MAX=WIFI_BLOB_HEADER+32+63;
-bool validWifiCredentials(const String &name,const String &secret){
-  return name.length()>0&&name.length()<=32&&secret.length()<=63&&
-    strlen(name.c_str())==name.length()&&strlen(secret.c_str())==secret.length();
-}
-bool saveWifiCredentials(const String &name,const String &secret){
-  if(!validWifiCredentials(name,secret))return false;
-  // One NVS blob/commit binds the SSID and password together across power loss.
-  uint8_t blob[WIFI_BLOB_MAX]={ 'W','F',1,uint8_t(name.length()),uint8_t(secret.length()) };
-  size_t length=WIFI_BLOB_HEADER+name.length()+secret.length();
-  memcpy(blob+WIFI_BLOB_HEADER,name.c_str(),name.length());
-  memcpy(blob+WIFI_BLOB_HEADER+name.length(),secret.c_str(),secret.length());
-  if(prefs.putBytes(WIFI_CREDENTIALS_KEY,blob,length)!=length||prefs.getBytesLength(WIFI_CREDENTIALS_KEY)!=length)return false;
-  uint8_t verified[WIFI_BLOB_MAX]={};
-  return prefs.getBytes(WIFI_CREDENTIALS_KEY,verified,length)==length&&memcmp(blob,verified,length)==0;
-}
-bool loadWifiCredentials(){
-  ssid="";password="";
-  if(prefs.isKey(WIFI_CREDENTIALS_KEY)){
-    // A present but invalid current blob never falls back to stale credentials.
-    size_t length=prefs.getBytesLength(WIFI_CREDENTIALS_KEY);uint8_t blob[WIFI_BLOB_MAX]={};
-    if(length<WIFI_BLOB_HEADER||length>sizeof(blob)||prefs.getBytes(WIFI_CREDENTIALS_KEY,blob,length)!=length)return false;
-    if(blob[0]!='W'||blob[1]!='F'||blob[2]!=1||blob[3]==0||blob[3]>32||blob[4]>63||length!=WIFI_BLOB_HEADER+blob[3]+blob[4])return false;
-    char name[33]={},secret[64]={};memcpy(name,blob+WIFI_BLOB_HEADER,blob[3]);memcpy(secret,blob+WIFI_BLOB_HEADER+blob[3],blob[4]);
-    String decodedName(name),decodedSecret(secret);
-    if(decodedName.length()!=blob[3]||decodedSecret.length()!=blob[4]||!validWifiCredentials(decodedName,decodedSecret))return false;
-    ssid=decodedName;password=decodedSecret;return true;
+void wipeString(String &value){for(unsigned i=0;i<value.length();i++)value.setCharAt(i,'\0');value="";}
+class WifiNvsStorage : public wifiprofiles::Storage {
+  ReadResult query(const char *key,size_t &length){
+    nvs_handle_t handle;const esp_err_t opened=nvs_open_from_partition("alarm_nvs","shift-alarm",NVS_READONLY,&handle);if(opened!=ESP_OK)return ReadResult::Error;
+    size_t stored=0;const esp_err_t result=nvs_get_blob(handle,key,nullptr,&stored);nvs_close(handle);
+    if(result==ESP_ERR_NVS_NOT_FOUND){length=0;return ReadResult::NotFound;}
+    if(result!=ESP_OK){length=0;return ReadResult::Error;}
+    length=stored;return ReadResult::Ok;
   }
-  // Legacy two-key storage is read only for a one-time migration, never updated.
-  String oldName=prefs.getString("ssid"),oldSecret=prefs.getString("password");
-  if(oldName.isEmpty())return !prefs.isKey("ssid");
-  if(!saveWifiCredentials(oldName,oldSecret))return false;
-  ssid=oldName;password=oldSecret;return true;
+  ReadResult read(const char *key,uint8_t *out,size_t &length){
+    nvs_handle_t handle;const esp_err_t opened=nvs_open_from_partition("alarm_nvs","shift-alarm",NVS_READONLY,&handle);if(opened!=ESP_OK)return ReadResult::Error;
+    size_t returned=length;const esp_err_t result=nvs_get_blob(handle,key,out,&returned);nvs_close(handle);length=returned;
+    if(result==ESP_ERR_NVS_NOT_FOUND)return ReadResult::NotFound;
+    return result==ESP_OK?ReadResult::Ok:ReadResult::Error;
+  }
+  bool write(const char *key,const uint8_t *data,size_t length){
+    nvs_handle_t handle;esp_err_t result=nvs_open_from_partition("alarm_nvs","shift-alarm",NVS_READWRITE,&handle);if(result!=ESP_OK)return false;
+    result=nvs_set_blob(handle,key,data,length);if(result==ESP_OK)result=nvs_commit(handle);nvs_close(handle);return result==ESP_OK;
+  }
+  bool erase(const char *key){
+    nvs_handle_t handle;esp_err_t result=nvs_open_from_partition("alarm_nvs","shift-alarm",NVS_READWRITE,&handle);if(result!=ESP_OK)return false;
+    result=nvs_erase_key(handle,key);if(result==ESP_OK)result=nvs_commit(handle);nvs_close(handle);return result==ESP_OK;
+  }
+ public:
+  ReadResult selectorSize(size_t &length) override{return query(WIFI_PROFILE_SELECTOR_KEY,length);}
+  ReadResult selectorData(uint8_t *out,size_t &length) override{return read(WIFI_PROFILE_SELECTOR_KEY,out,length);}
+  ReadResult slotSize(uint8_t slot,size_t &length) override{return slot<2?query(WIFI_PROFILE_SLOT_KEYS[slot],length):ReadResult::Error;}
+  ReadResult slotData(uint8_t slot,uint8_t *out,size_t &length) override{return slot<2?read(WIFI_PROFILE_SLOT_KEYS[slot],out,length):ReadResult::Error;}
+  bool writeSelector(const uint8_t *data,size_t length) override{return write(WIFI_PROFILE_SELECTOR_KEY,data,length);}
+  bool writeSlot(uint8_t slot,const uint8_t *data,size_t length) override{return slot<2&&write(WIFI_PROFILE_SLOT_KEYS[slot],data,length);}
+  bool eraseSlot(uint8_t slot) override{
+    if(slot>=2)return false;
+    const char *key=WIFI_PROFILE_SLOT_KEYS[slot];size_t length=0;const auto found=query(key,length);if(found==ReadResult::NotFound)return true;if(found!=ReadResult::Ok||!length||length>wifiprofiles::MAX_BLOB_SIZE)return false;
+    uint8_t zeros[wifiprofiles::MAX_BLOB_SIZE]={},verified[wifiprofiles::MAX_BLOB_SIZE];
+    size_t returned=sizeof(verified);const bool overwritten=write(key,zeros,length)&&wifiprofiles::readSlot(*this,slot,verified,returned)==ReadResult::Ok&&returned==length&&memcmp(zeros,verified,length)==0;
+    wifiprofiles::secureWipe(zeros,sizeof(zeros));wifiprofiles::secureWipe(verified,sizeof(verified));
+    return overwritten&&erase(key);
+  }
+};
+WifiNvsStorage wifiStorage;
+bool clearInactiveWifiSlot(uint8_t active){
+  const uint8_t inactive=active^1u;if(!wifiStorage.eraseSlot(inactive))return false;
+  uint8_t readback[wifiprofiles::MAX_BLOB_SIZE]={};size_t length=sizeof(readback);const bool clear=wifiprofiles::readSlot(wifiStorage,inactive,readback,length)==wifiprofiles::Storage::ReadResult::NotFound;wifiprofiles::secureWipe(readback,sizeof(readback));return clear;
 }
+wifiprofiles::CommitResult persistWifiProfiles(const wifiprofiles::List &profiles,wifiprofiles::Selector &committed){
+  if(wifiStorageFault)return wifiprofiles::CommitResult::StorageFault;
+  const auto result=wifiprofiles::commit(wifiStorage,profiles,wifiSelectorValid?&wifiSelector:nullptr,committed);
+  if(result==wifiprofiles::CommitResult::StorageFault||result==wifiprofiles::CommitResult::CommittedStorageFault)wifiStorageFault=true;
+  return result;
+}
+bool legacyWifiProfile(wifiprofiles::Profile &profile){
+  if(prefs.isKey(WIFI_CREDENTIALS_KEY)){
+    size_t length=prefs.getBytesLength(WIFI_CREDENTIALS_KEY);wifiprofiles::SensitiveBytes<wifiprofiles::LEGACY_MAX_BLOB_SIZE> blob;
+    if(!length||length>blob.size()||prefs.getBytes(WIFI_CREDENTIALS_KEY,blob.data(),length)!=length)return false;
+    return wifiprofiles::decodeLegacy(blob.data(),length,profile);
+  }
+  String name=prefs.getString("ssid"),secret=prefs.getString("password");
+  if(name.isEmpty())return false;
+  const bool assigned=profile.ssid.assign(name.c_str(),name.length())&&profile.password.assign(secret.c_str(),secret.length());
+  wipeString(name);wipeString(secret);return assigned&&wifiprofiles::valid(profile);
+}
+bool loadWifiProfiles(){
+  wifiProfiles={};
+  wifiprofiles::Record loaded;wifiprofiles::Selector selected;const auto load=wifiprofiles::load(wifiStorage,loaded,selected);
+  if(load==wifiprofiles::LoadResult::Ok){wifiProfiles=loaded.list;wifiSelector=selected;wifiSelectorValid=true;wifiStorageFault=!clearInactiveWifiSlot(selected.slot);if(!wifiStorageFault){prefs.remove(WIFI_CREDENTIALS_KEY);prefs.remove("ssid");prefs.remove("password");}return true;}
+  if(load==wifiprofiles::LoadResult::StorageFault){wifiStorageFault=true;wifiprofiles::Profile fallback;if(legacyWifiProfile(fallback)){wifiprofiles::addOrUpdate(wifiProfiles,fallback);return true;}return false;}
+  wifiprofiles::Profile legacy;
+  if(!legacyWifiProfile(legacy))return !prefs.isKey(WIFI_CREDENTIALS_KEY)&&!prefs.isKey("ssid");
+  wifiprofiles::List migrated;wifiprofiles::addOrUpdate(migrated,legacy);
+  wifiprofiles::Selector committed;const auto result=persistWifiProfiles(migrated,committed);
+  if(result!=wifiprofiles::CommitResult::Committed){wifiProfiles=migrated;wifiMigrationPending=result==wifiprofiles::CommitResult::Failed;return true;}
+  wifiProfiles=migrated;wifiSelector=committed;wifiSelectorValid=true;
+  // Old keys are deleted only after the checksummed replacement passes a full readback decode.
+  prefs.remove(WIFI_CREDENTIALS_KEY);prefs.remove("ssid");prefs.remove("password");
+  return true;
+}
+String currentWifiSsid(){return WiFi.isConnected()?WiFi.SSID():String("未連線");}
 String savedSchedule() {
   size_t len=prefs.getBytesLength("schedule");if(!len||len>MAX_JSON)return "";
   std::vector<char> bytes(len+1,0);prefs.getBytes("schedule",bytes.data(),len);return String(bytes.data());
@@ -289,7 +346,7 @@ void draw() {
   } else {
     const int64_t now=time(nullptr),next=clockValid()?nextAlarmEpoch(now):INT64_MAX;alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);int percent=0;uint32_t age=0;const bool valid=battery::value(batteryState,millis(),percent,age);
     if(uiState.page==deviceui::Page::PhoneSetup){line(8,6,"手機設定",2);if(WiFi.isConnected()){String url=String("http://")+WiFi.localIP().toString()+"/calendar";line(8,38,url);qr(url,deviceui::PHONE_QR_X,72,deviceui::PHONE_QR_SCALE);line(deviceui::PHONE_TEXT_X,82,"掃碼設定班表");}else{line(8,48,"尚未連上無線網路");line(8,76,"按住左右鍵 10 秒");line(8,98,"再依畫面加入裝置熱點");line(8,126,"手機開啟 192.168.4.1");}}
-    else if(uiState.page==deviceui::Page::Connectivity){line(8,6,"連線狀態",2);line(8,48,String("無線網路：")+(WiFi.isConnected()?"已連線":"未連線"));line(8,78,String("遠端連線：")+(tail.state==ALARM_TAILNET_CONNECTED?"已連線":"未連線"));line(8,108,String("後端服務：")+(backendReachableNow(millis())?"可連線":"無法連線"));line(8,146,"連線異常不影響本機鬧鐘");}
+    else if(uiState.page==deviceui::Page::Connectivity){line(8,6,"連線狀態",2);line(8,42,String("目前網路：")+currentWifiSsid());line(8,68,String("已保存 ")+String(unsigned(wifiProfiles.count))+" 組");line(8,94,String("遠端連線：")+(tail.state==ALARM_TAILNET_CONNECTED?"已連線":"未連線"));line(8,120,String("後端服務：")+(backendReachableNow(millis())?"可連線":"無法連線"));line(8,154,"連線異常不影響本機鬧鐘");}
     else if(uiState.page==deviceui::Page::Schedule){line(8,6,"班表資訊",2);line(8,44,String("下次上班：")+(next==INT64_MAX?"尚無":dateWeek(next)));line(8,70,String("響鈴時間：")+(next==INT64_MAX?"--:--":alarmTime(next)));line(8,96,String("鬧鐘數量：")+String(unsigned(alarms.size())));line(8,122,String("儲存狀態：")+(revision.isEmpty()?"尚未儲存":localSchedule?"本機已儲存":"已同步"));line(8,148,String("版次：")+(revision.isEmpty()?"--":revision.substring(0,18)));}
     else if(uiState.page==deviceui::Page::Device){line(8,6,"裝置資訊",2);line(8,48,String("韌體版本：")+VERSION);line(8,78,String("IP：")+(WiFi.isConnected()?WiFi.localIP().toString():"未連線"));line(8,108,String("電池：")+(valid?String(percent)+"%":"未知"));line(8,134,String("充電：")+(chargingInputValid?(charging.load()?"是":"否"):"未知"));}
     else if(uiState.page==deviceui::Page::Update){alarm_ota_status_t ota={};alarm_ota_get_status(&ota);line(8,6,"檢查更新",2);line(8,38,String("目前版本：")+VERSION);line(8,62,ota.marker_fault?"已下載狀態：異常":ota.staged_valid?String("已下載：")+ota.staged.manifest.version:"已下載：沒有");line(8,86,String("充電準備：")+(chargingInputValid&&charging.load()?"可以安裝":"尚未就緒"));if(WiFi.isConnected()){String url=String("http://")+WiFi.localIP().toString()+"/update";line(8,108,url);qr(url,8,138,1);line(78,146,"掃碼開啟更新頁");line(78,168,"實體鍵不會變更更新");}else line(8,120,"連上無線網路後顯示條碼");}
@@ -362,7 +419,74 @@ bool applySchedule(const String &body,bool persist,String &error) {
   return true;
 }
 bool authorized() { if(token.length()&&server.header("Authorization")==String("Bearer ")+token)return true; server.send(401,"application/json","{\"error\":\"需要裝置授權\"}");return false; }
-void startPortal() { wakeScreen();if(portal)return;portal=true; WiFi.mode(WIFI_AP_STA); WiFi.softAP(apName.c_str(),apPassword.c_str());dns.start(53,"*",WiFi.softAPIP());WiFi.scanNetworks(true); Serial.println("SETUP_AP_STARTED");Serial.println(String("SETUP_AP_SSID ")+apName);Serial.println("SETUP_URL http://192.168.4.1"); }
+void startPortal() { wakeScreen();if(portal)return;portal=true; WiFi.mode(WIFI_AP_STA); WiFi.softAP(apName.c_str(),apPassword.c_str());dns.start(53,"*",WiFi.softAPIP());Serial.println("SETUP_AP_STARTED");Serial.println(String("SETUP_AP_SSID ")+apName);Serial.println("SETUP_URL http://192.168.4.1"); }
+void wifiBackoff(uint32_t now){wififailover::retryLater(wifiState,now);}
+void startWifiScan(uint32_t now){
+  if(wifiProfiles.count==0){startPortal();wifiState.phase=wififailover::Phase::Idle;return;}
+  WiFi.scanDelete();const int result=WiFi.scanNetworks(true,true);
+  if(result==WIFI_SCAN_FAILED){wifiBackoff(now);return;}
+  wififailover::beginScan(wifiState,now);connectStarted=now;
+}
+void connectSavedWifi(size_t index,uint32_t now){
+  if(index>=wifiProfiles.count){wifiBackoff(now);return;}
+  const auto &profile=wifiProfiles.profiles[index];
+  WiFi.begin(profile.ssid.c_str(),profile.password.c_str());wifiState.phase=wififailover::Phase::Connecting;wifiState.phase_started_ms=now;connectStarted=now;
+}
+void clearPendingWifi(){pendingPassword.clear();pendingSsid.clear();wifiPendingTrial=false;connecting=false;}
+void restartWifiSelection(uint32_t now){
+  wifiState={};wifiState.phase_started_ms=now;wifiState.retry_delay_ms=0;
+  if(wifiProfiles.count)startWifiScan(now);else startPortal();
+}
+void cancelWifiSelection(uint32_t now){
+  WiFi.scanDelete();WiFi.disconnect(false,false);clearPendingWifi();wififailover::cancelForMutation(wifiState,now);
+}
+void continueSavedWifi(uint32_t now){
+  const int candidate=wififailover::nextCandidate(wifiState,now);if(candidate>=0)connectSavedWifi(size_t(candidate),now);else wifiBackoff(now);
+}
+void serviceWifi(uint32_t now){
+  if(wifiStorageFault&&wififailover::elapsed(now,wifiMigrationAttempt,1000)){
+    wifiMigrationAttempt=now;wifiprofiles::Record recovered;wifiprofiles::Selector selected;
+    const auto result=wifiprofiles::load(wifiStorage,recovered,selected);
+    if(result==wifiprofiles::LoadResult::Ok&&clearInactiveWifiSlot(selected.slot)){wifiProfiles=recovered.list;wifiSelector=selected;wifiSelectorValid=true;wifiStorageFault=false;wifiMigrationPending=false;prefs.remove(WIFI_CREDENTIALS_KEY);prefs.remove("ssid");prefs.remove("password");cancelWifiSelection(now);restartWifiSelection(now);}
+    else if(result==wifiprofiles::LoadResult::Empty&&(prefs.isKey(WIFI_CREDENTIALS_KEY)||prefs.isKey("ssid"))){wifiStorageFault=false;wifiSelectorValid=false;wifiMigrationPending=true;}
+  }
+  if(wifiMigrationPending&&!wifiStorageFault&&wififailover::elapsed(now,wifiMigrationAttempt,60000)){
+    wifiMigrationAttempt=now;wifiprofiles::Selector committed;const auto result=persistWifiProfiles(wifiProfiles,committed);
+    if(result==wifiprofiles::CommitResult::Committed){wifiSelector=committed;wifiSelectorValid=true;prefs.remove(WIFI_CREDENTIALS_KEY);prefs.remove("ssid");prefs.remove("password");wifiMigrationPending=false;}
+  }
+  if(WiFi.isConnected()){
+    if(wifiPendingTrial&&pendingSsid.equals(WiFi.SSID().c_str(),WiFi.SSID().length())){
+      wifiprofiles::List next=wifiProfiles;
+      const auto result=wifiprofiles::addOrUpdate(next,{pendingSsid.c_str(),pendingSsid.size(),pendingPassword.c_str(),pendingPassword.size()});wifiprofiles::Selector committed;
+      const auto stored=result==wifiprofiles::Result::Ok?persistWifiProfiles(next,committed):wifiprofiles::CommitResult::Failed;
+      if(stored==wifiprofiles::CommitResult::Committed||stored==wifiprofiles::CommitResult::CommittedStorageFault){wifiProfiles=next;wifiSelector=committed;wifiSelectorValid=true;setupFailed=false;clearPendingWifi();apCloseAt=now+20000;lastPoll=now-POLL_MS;}
+      else{setupFailed=true;clearPendingWifi();WiFi.disconnect(false,false);wififailover::candidateFailed(wifiState,now);}
+    }else if(wifiPendingTrial){WiFi.disconnect(false,false);}
+    else wififailover::healthy(wifiState);
+    if(wifiPendingTrial&&wififailover::elapsed(now,connectStarted,wififailover::CONNECT_TIMEOUT_MS)){setupFailed=true;clearPendingWifi();WiFi.disconnect(false,false);wififailover::candidateFailed(wifiState,now);}
+    return;
+  }
+  if(wifiPendingTrial){
+    if(wififailover::elapsed(now,connectStarted,wififailover::CONNECT_TIMEOUT_MS)){setupFailed=true;clearPendingWifi();WiFi.disconnect(false,false);wififailover::candidateFailed(wifiState,now);}
+    return;
+  }
+  if(wifiState.phase==wififailover::Phase::Scanning){
+    const int scan=WiFi.scanComplete();
+    if(scan>=0){
+      std::array<wififailover::Observation,wifiprofiles::MAX_PROFILES> observations{};
+      for(size_t p=0;p<wifiProfiles.count;p++)for(int i=0;i<scan;i++)if(WiFi.SSID(i).equals(wifiProfiles.profiles[p].ssid.c_str())){
+        if(!observations[p].visible||WiFi.RSSI(i)>observations[p].rssi)observations[p]={true,WiFi.RSSI(i)};
+      }
+      wififailover::scanned(wifiState,wififailover::candidates(wifiProfiles,observations),now);continueSavedWifi(now);
+    }else if(scan==WIFI_SCAN_FAILED||wififailover::elapsed(now,connectStarted,15000)){WiFi.scanDelete();wifiBackoff(now);}
+    return;
+  }
+  if(wifiState.phase==wififailover::Phase::Connecting){
+    if(wififailover::elapsed(now,connectStarted,wififailover::CONNECT_TIMEOUT_MS)){WiFi.disconnect(false,false);continueSavedWifi(now);}
+    return;
+  }
+  if(wififailover::shouldStartCycle(false,false,now,wifiState.phase_started_ms,wifiState.retry_delay_ms))startWifiScan(now);
+}
 String devicePage(String content) {
   int styleEnd=content.indexOf("</style>");
   if(styleEnd>=0)content=content.substring(styleEnd+8);
@@ -612,7 +736,9 @@ void routes() {
     page+="</select><label for='brightness'>螢幕亮度</label><select id='brightness' name='brightness'>";
     const uint8_t brightnessLevels[]={10,25,40,60,80,100};
     for(uint8_t percent:brightnessLevels)page+=String("<option value='")+percent+"'"+(screenBrightness==percent?" selected":"")+">"+percent+"%</option>";
-    page+="</select><p>降低亮度可減少背光耗電與發熱。</p><button>儲存螢幕設定</button></form><p>非響鈴時長按機殼頂部中間按鈕 1.2 秒，放開後關屏；關屏後按任一按鈕只會喚醒。鬧鐘到點會依設定亮度自動亮屏並正常響鈴，響鈴時按任一按鈕即可停止。</p><h2>時鐘校對</h2><p>固定使用臺北時間（UTC+8）；每三小時自動透過網路校時，重新開機及恢復網路後也會由網路時間服務重試。</p><a href='/clock'>手動調整時鐘</a><p id='clock-status'>正在讀取校時狀態…</p><script>async function clockStatus(){const el=document.querySelector('#clock-status');try{const r=await fetch('/api/clock');if(!r.ok)throw Error();const d=await r.json();el.textContent=d.last_sync?'最近網路校時：'+new Date(d.last_sync*1000).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})+(d.overdue?'。校時已逾期，請檢查網際網路連線。':'。每三小時自動校對。'):d.overdue?'網路校時尚未成功，請檢查網際網路連線，或到班表頁使用手機校時。':'等待首次網路校時…';}catch(e){el.textContent='無法取得校時狀態，請確認裝置連線。'}}clockStatus();setInterval(clockStatus,10000)</script><h2>韌體更新</h2><p>下載已發布版本，保留舊版供失敗時回復。</p><a href='/update'>檢查裝置更新</a><h2>Tailscale連線</h2><p>登入授權，讓裝置在不同環境仍能同步班表。</p><a href='/tailnet'>設定Tailscale</a><h2>更換無線網路</h2><p>按下後裝置會開啟配網熱點，掃描螢幕條碼即可重新選擇網路。原設定會保留到新網路連線成功。</p><form method='post' action='/wifi/reset'><input type='hidden' name='nonce' value='"+setupNonce+"'><button>重新設定無線網路</button></form><p>無法連上此頁時，可同時按住「＋」與「－」十秒，啟動配網。</p><a href='/'>返回</a>";
+    page+="</select><p>降低亮度可減少背光耗電與發熱。</p><button>儲存螢幕設定</button></form><p>非響鈴時長按機殼頂部中間按鈕 1.2 秒，放開後關屏；關屏後按任一按鈕只會喚醒。鬧鐘到點會依設定亮度自動亮屏並正常響鈴，響鈴時按任一按鈕即可停止。</p><h2>時鐘校對</h2><p>固定使用臺北時間（UTC+8）；每三小時自動透過網路校時，重新開機及恢復網路後也會由網路時間服務重試。</p><a href='/clock'>手動調整時鐘</a><p id='clock-status'>正在讀取校時狀態…</p><script>async function clockStatus(){const el=document.querySelector('#clock-status');try{const r=await fetch('/api/clock');if(!r.ok)throw Error();const d=await r.json();el.textContent=d.last_sync?'最近網路校時：'+new Date(d.last_sync*1000).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})+(d.overdue?'。校時已逾期，請檢查網際網路連線。':'。每三小時自動校對。'):d.overdue?'網路校時尚未成功，請檢查網際網路連線，或到班表頁使用手機校時。':'等待首次網路校時…';}catch(e){el.textContent='無法取得校時狀態，請確認裝置連線。'}}clockStatus();setInterval(clockStatus,10000)</script><h2>韌體更新</h2><p>下載已發布版本，保留舊版供失敗時回復。</p><a href='/update'>檢查裝置更新</a><h2>Tailscale連線</h2><p>登入授權，讓裝置在不同環境仍能同步班表。</p><a href='/tailnet'>設定Tailscale</a>";
+    page+=WIFI_MANAGER_PAGE;page.replace("WIFI_NONCE",setupNonce);
+    page+="<h2>配網熱點</h2><p>需要從熱點操作時才啟動。已保存網路不會被清除。</p><form method='post' action='/wifi/reset'><input type='hidden' name='nonce' value='"+setupNonce+"'><button>啟動配網熱點</button></form><p>無法連上此頁時，可同時按住「＋」與「－」十秒，啟動配網。</p><a href='/'>返回</a>";
     server.send(200,"text/html; charset=utf-8",devicePage(page));
   });
   server.on("/display",HTTP_POST,[]{
@@ -633,9 +759,23 @@ void routes() {
   server.on("/api/test",HTTP_POST,[]{if(!authorized())return;startRing("喇叭測試");server.send(200,"application/json","{\"ok\":true}");});
   server.on("/api/stop",HTTP_POST,[]{if(!authorized())return;stopRing(false);server.send(200,"application/json","{\"ok\":true}");});
   server.on("/api/wifi",HTTP_GET,[]{
-    JsonDocument d;d["connected"]=WiFi.isConnected();d["connecting"]=connecting;d["failed"]=setupFailed;d["ip"]=WiFi.localIP().toString();d["management_url"]=manageUrl;
-    auto list=d["networks"].to<JsonArray>();int n=WiFi.scanComplete();for(int i=0;i<n;i++){auto a=list.add<JsonObject>();a["ssid"]=WiFi.SSID(i);a["rssi"]=WiFi.RSSI(i);}
+    JsonDocument d;d["connected"]=WiFi.isConnected();d["connecting"]=connecting;d["failed"]=setupFailed;d["storageFault"]=wifiStorageFault;d["ip"]=WiFi.localIP().toString();d["management_url"]=manageUrl;
+    auto list=d["networks"].to<JsonArray>();int n=WiFi.scanComplete();for(int i=0;i<n;i++){auto a=list.add<JsonObject>();a["ssid"]=WiFi.SSID(i);a["rssi"]=WiFi.RSSI(i);}if(n==WIFI_SCAN_FAILED&&!connecting&&wifiState.phase!=wififailover::Phase::Scanning)WiFi.scanNetworks(true,true);
+    auto profiles=d["profiles"].to<JsonArray>();for(size_t p=0;p<wifiProfiles.count;p++){auto profile=profiles.add<JsonObject>();profile["ssid"]=wifiProfiles.profiles[p].ssid.c_str();profile["connected"]=WiFi.isConnected()&&WiFi.SSID().equals(wifiProfiles.profiles[p].ssid.c_str());bool visible=false;int strongest=-127;for(int i=0;i<n;i++)if(WiFi.SSID(i).equals(wifiProfiles.profiles[p].ssid.c_str())){visible=true;strongest=std::max(strongest,int(WiFi.RSSI(i)));}profile["visible"]=visible;if(visible)profile["rssi"]=strongest;else profile["rssi"]=nullptr;}
     String out;serializeJson(d,out);server.send(200,"application/json",out);
+  });
+  server.on("/api/wifi/remove",HTTP_POST,[]{
+    if(!localNonce())return;
+    if(wifiStorageFault){server.send(409,"text/plain; charset=utf-8","Wi-Fi 儲存狀態待確認，暫停修改；裝置會重新載入確認");return;}
+    String requested=server.arg("ssid");wifiprofiles::List next=wifiProfiles;
+    const auto result=wifiprofiles::remove(next,requested.c_str(),requested.length());
+    if(result==wifiprofiles::Result::Invalid){server.send(422,"text/plain; charset=utf-8","網路名稱格式無效");return;}
+    if(result==wifiprofiles::Result::NotFound){server.send(404,"text/plain; charset=utf-8","找不到這組已保存網路");return;}
+    const uint32_t now=millis();cancelWifiSelection(now);wifiprofiles::Selector committed;const auto stored=persistWifiProfiles(next,committed);
+    if(stored==wifiprofiles::CommitResult::Failed){wipeString(requested);restartWifiSelection(now);server.send(409,"text/plain; charset=utf-8","儲存失敗，網路尚未移除");return;}
+    if(stored==wifiprofiles::CommitResult::StorageFault){wipeString(requested);restartWifiSelection(now);server.send(409,"text/plain; charset=utf-8","Wi-Fi 儲存結果待確認，暫停修改；裝置會重新載入確認");return;}
+    wifiProfiles=next;wifiSelector=committed;wifiSelectorValid=true;wipeString(requested);restartWifiSelection(now);
+    server.send(200,"text/plain; charset=utf-8",stored==wifiprofiles::CommitResult::CommittedStorageFault?"已移除；舊儲存槽清理待確認，暫停其他修改":"已移除保存的 Wi-Fi");
   });
   server.on("/",HTTP_GET,[]{
     if(!portal){
@@ -646,15 +786,21 @@ void routes() {
       page+="<h2>裝置設定</h2><p>調整螢幕方向、更換無線網路，或檢查更新。</p><a href='/display'>開啟裝置設定</a><p class='help'>同時按住「＋」與「－」十秒，也能重新配網。</p>";
       server.send(200,"text/html; charset=utf-8",devicePage(page));return;
     }
+    String setupPage=String("<style></style><h1>班表鬧鐘配網</h1><p>配網熱點沒有網際網路。裝置嘗試新網路時，本頁仍可繼續使用。</p>")+WIFI_MANAGER_PAGE;setupPage.replace("WIFI_NONCE",setupNonce);server.send(200,"text/html; charset=utf-8",devicePage(setupPage));
+#if 0
 
     String page=R"HTML(<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>班表鬧鐘配網</title><style>body{font:18px system-ui;max-width:32em;margin:24px}input,select{display:block;box-sizing:border-box;font:18px system-ui;width:100%;margin:8px 0 20px;padding:10px}button{font:18px system-ui;padding:12px}#status{line-height:1.6}</style><h1>班表鬧鐘</h1><p><a href=/display>裝置設定（方向／無線網路）</a></p><p>選擇目前環境的無線網路。配網熱點沒有網際網路，設定時請保持連線。</p><form id="wifi"><input type="hidden" name="nonce" value="SETUP_NONCE"><label>無線網路<select id="networks"><option value="">請選擇網路，或在下方輸入</option></select></label><label>網路名稱<input id="ssid" name="ssid" required maxlength="32" autocomplete="off"></label><label>密碼<input name="password" type="password" maxlength="63" autocomplete="off"></label><button>連線並儲存</button></form><p id="status"></p><script>const statusEl=document.querySelector('#status'),form=document.querySelector('#wifi'),list=document.querySelector('#networks');list.onchange=()=>document.querySelector('#ssid').value=list.value;let populated=false;async function update(){try{const d=await(await fetch('/api/wifi')).json();if(!populated&&d.networks.length){for(const n of d.networks){const o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' ('+n.rssi+' dBm)';list.append(o)}populated=true}if(d.connected&&!d.connecting){statusEl.replaceChildren(document.createTextNode('連線成功，請將手機切回剛設定的無線網路，再開啟：'));const a=document.createElement('a');a.href='http://'+d.ip;a.textContent=a.href;statusEl.append(a)}else if(d.connecting)statusEl.textContent='連線中，請保持此頁開啟…';else if(d.failed)statusEl.textContent='連線失敗，請檢查密碼後重試。';}catch(e){}}form.onsubmit=async(e)=>{e.preventDefault();statusEl.textContent='連線中…';try{const r=await fetch('/setup',{method:'POST',body:new URLSearchParams(new FormData(form))});if(!r.ok)statusEl.textContent=await r.text()}catch(e){statusEl.textContent='請重新連上裝置熱點後再試。'}};update();setInterval(update,2000)</script>)HTML";page.replace("SETUP_NONCE",setupNonce);server.send(200,"text/html; charset=utf-8",devicePage(page));
+#endif
   });
   server.on("/setup",HTTP_POST,[]{
-    if(!portal||server.arg("nonce")!=setupNonce){server.send(403,"text/plain; charset=utf-8","請重新開啟裝置配網頁再試");return;}
+    if(!localNonce())return;
+    if(wifiStorageFault){server.send(409,"text/plain; charset=utf-8","Wi-Fi 儲存狀態待確認，暫停修改；裝置會重新載入確認");return;}
     String s=server.arg("ssid"),p=server.arg("password");
-    if(!s.length()||s.length()>32||p.length()>63){server.send(400,"text/plain; charset=utf-8","網路名稱或密碼格式無效");return;}
-    pendingSsid=s;pendingPassword=p;connecting=true;setupFailed=false;connectStarted=millis();apCloseAt=0;
-    WiFi.begin(s.c_str(),p.c_str());server.send(202,"application/json","{\"connecting\":true}");
+    wifiprofiles::Profile candidate{s.c_str(),s.length(),p.c_str(),p.length()};
+    if(!wifiprofiles::valid(candidate)){wipeString(p);wipeString(s);server.send(422,"text/plain; charset=utf-8","網路名稱須為 1 至 32 bytes；密碼須留空或為 8 至 63 bytes");return;}
+    if(wifiprofiles::indexOf(wifiProfiles,candidate.ssid.c_str(),candidate.ssid.size())<0&&wifiProfiles.count>=wifiprofiles::MAX_PROFILES){wipeString(p);wipeString(s);server.send(409,"text/plain; charset=utf-8","已保存 4 組網路，請先明確移除一組");return;}
+    const uint32_t now=millis();cancelWifiSelection(now);startPortal();pendingSsid=candidate.ssid;pendingPassword=candidate.password;wipeString(p);wipeString(s);connecting=true;setupFailed=false;wifiPendingTrial=true;connectStarted=now;apCloseAt=0;
+    WiFi.begin(pendingSsid.c_str(),pendingPassword.c_str());server.send(202,"application/json","{\"connecting\":true}");
   });
   server.onNotFound([]{if(portal){server.sendHeader("Location","http://192.168.4.1/");server.send(302,"text/plain","");}else server.send(404,"text/plain; charset=utf-8","找不到此頁面");}); server.begin();deviceRoutesReady=true;
 }
@@ -685,7 +831,7 @@ void setup() {
        prefs.getString("token")!=PROVISION_TOKEN||prefs.getString("backend")!=PROVISION_BACKEND)abort();
   }
 #endif
-  if(!loadWifiCredentials()){setupFailed=true;}
+  if(!loadWifiProfiles()){setupFailed=true;}
   backend=prefs.getString("backend");if(backend=="http://192.168.18.31:8237"){backend="http://100.126.226.79:8237";prefs.putString("backend",backend);}token=prefs.getString("token");manageUrl=prefs.getString("manage");
   apPassword=prefs.getString("ap-pass");if(apPassword.isEmpty()){char b[13];snprintf(b,sizeof(b),"%08lx%04lx",(unsigned long)esp_random(),(unsigned long)(esp_random()&0xffff));apPassword=b;prefs.putString("ap-pass",apPassword);}
   uint8_t staMac[6]={};ESP_ERROR_CHECK(esp_read_mac(staMac,ESP_MAC_WIFI_STA));char apSuffix[5];deviceidentity::suffix(staMac,apSuffix);apName=String("ShiftAlarm-")+apSuffix;
@@ -703,11 +849,11 @@ void setup() {
   ESP_ERROR_CHECK(i2s_driver_install(I2S_NUM_0,&cfg,0,nullptr));ESP_ERROR_CHECK(i2s_set_pin(I2S_NUM_0,&pins));if(xTaskCreatePinnedToCore(soundTask,"speaker",3072,nullptr,2,nullptr,0)!=pdPASS)abort();
   alarm_ota_config_t otaConfig={};otaConfig.board_id="xingzhi-cube-1.54tft-wifi";otaConfig.device_token=(const uint8_t*)token.c_str();otaConfig.device_token_length=token.length();otaConfig.quiet_window_seconds=300;otaConfig.transfer_timeout_seconds=600;otaConfig.authorize=otaAuthorize;otaConfig.read_guard=otaReadGuard;otaConfig.marker_load=otaMarkerLoad;otaConfig.marker_store=otaMarkerStore;otaConfig.marker_clear=otaMarkerClear;
   ESP_ERROR_CHECK(alarm_proxy_init("100.126.226.79",8237));
-  setenv("TZ","CST-8",1);tzset();WiFi.mode(WIFI_STA);WiFi.setAutoReconnect(true);if(ssid.length())WiFi.begin(ssid.c_str(),password.c_str());else startPortal();
+  setenv("TZ","CST-8",1);tzset();WiFi.persistent(false);WiFi.mode(WIFI_STA);WiFi.setAutoReconnect(false);wifiState.phase_started_ms=millis();wifiState.retry_delay_ms=0;if(wifiProfiles.count)startWifiScan(millis());else startPortal();
   esp_sntp_set_time_sync_notification_cb(networkClockSynced);esp_sntp_set_sync_interval(CLOCK_SYNC_INTERVAL_MS);configTime(8*3600,0,"pool.ntp.org","time.google.com");routes();proxyStarted=alarm_proxy_start()==ESP_OK;bootMs=millis();lastPoll=millis()-POLL_MS;draw();
   ESP_ERROR_CHECK(alarm_ota_boot_self_test(otaDiagnostics,nullptr,15000));
   otaReady=alarm_ota_init(&otaConfig)==ESP_OK;if(otaReady){esp_err_t staged=alarm_ota_load_staged();alarm_ota_status_t status={};alarm_ota_get_status(&status);if(staged!=ESP_OK||status.marker_fault){otaStateSet("marker-fault","marker-fault","更新記錄狀態不明，已封鎖下載與安裝");}else if(status.staged_valid){otaReceived=status.staged.manifest.size;otaTotal=status.staged.manifest.size;otaStateSet("staged","ready","已載入完整驗證的更新，可離線安裝");}else otaResetTerminalNoStaged();}
-  Serial.printf("SHIFT_ALARM_READY v%s\n",VERSION);Serial.printf("PSRAM_BYTES %lu\n",(unsigned long)ESP.getPsramSize());Serial.println(ssid.length()?"BOOT_WIFI_MODE SAVED":"BOOT_WIFI_MODE FIRST_SETUP");
+  Serial.printf("SHIFT_ALARM_READY v%s\n",VERSION);Serial.printf("PSRAM_BYTES %lu\n",(unsigned long)ESP.getPsramSize());Serial.println(wifiProfiles.count?"BOOT_WIFI_MODE SAVED":"BOOT_WIFI_MODE FIRST_SETUP");
 }
 void loop() {
   sampleBattery(millis());
@@ -715,17 +861,7 @@ void loop() {
   if(!proxyStarted){if(alarm_proxy_start()==ESP_OK)proxyStarted=true;}
   refreshOtaGuard();if(otaReady)alarm_ota_maintenance();
   server.handleClient();if(portal)dns.processNextRequest();uint32_t ms=millis();time_t now=time(nullptr);
-  if(connecting&&WiFi.isConnected()&&WiFi.SSID()==pendingSsid) {
-    connecting=false;
-    if(saveWifiCredentials(pendingSsid,pendingPassword)){
-      setupFailed=false;ssid=pendingSsid;password=pendingPassword;apCloseAt=ms+20000;lastPoll=ms-POLL_MS;
-    }else{
-      setupFailed=true;apCloseAt=0;WiFi.disconnect(false,false);
-      // Retain old RAM credentials and the provisioning AP for an explicit retry.
-    }
-    pendingPassword="";
-  }
-  if(connecting&&ms-connectStarted>=20000){connecting=false;setupFailed=true;WiFi.disconnect(false,false);}
+  serviceWifi(ms);
   if(portal&&apCloseAt&&int32_t(ms-apCloseAt)>=0)closePortal();
 
   const buttons::Event event=buttons::update(buttonState,ms,!digitalRead(BUTTON_SNOOZE),!digitalRead(BUTTON_STOP),!digitalRead(BUTTON_TEST),screenAwake,ringing);

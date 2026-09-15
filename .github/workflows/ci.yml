@@ -14,6 +14,7 @@ jobs:
       - run: python -m unittest discover -s deploy/tests -v
       - run: node --check static/app.js
       - run: node firmware-next/tests/ota_status_browser_test.js
+      - run: node firmware-next/tests/wifi_ui_contract_test.js
       - run: docker build -t shift-alarm:check .
   firmware:
     runs-on: ubuntu-latest
@@ -69,4 +70,6 @@ jobs:
       - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/device_identity_test.cpp -o /tmp/device-identity-test && /tmp/device-identity-test
       - run: cc -std=c11 -Wall -Wextra -Werror -Ifirmware-next/components/alarm_tailnet/include firmware-next/components/alarm_tailnet/tests/retry_policy_test.c -o /tmp/tailnet-retry-test && /tmp/tailnet-retry-test
       - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/connectivity_policy_test.cpp -o /tmp/connectivity-policy-test && /tmp/connectivity-policy-test
+      - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/wifi_profiles_test.cpp -o /tmp/wifi-profiles-test && /tmp/wifi-profiles-test
+      - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/wifi_failover_policy_test.cpp -o /tmp/wifi-failover-test && /tmp/wifi-failover-test
       - run: c++ -std=c++17 -Wall -Wextra -Werror -Ifirmware-next/components/arduino_libraries/ArduinoJson/src firmware-next/tests/ota_manifest_policy_test.cpp -o /tmp/ota-manifest-policy-test && /tmp/ota-manifest-policy-test
