@@ -70,3 +70,5 @@ python3 firmware-next/components/alarm_ota/tests/test_manifest_contract.py
 ```
 
 2026-09-15，裝置 `100.104.66.47` 已從 0.3.20 經原生 Tailscale 升級到 0.3.21。1,653,056-byte 映像完整下載並由裝置驗證後，另一次 install POST 完成切換、重開與回連；方向 90°、亮度 25%、關屏 5 分鐘、班表 revision、5 個鬧鐘及 Wi-Fi／Tailnet 身分均保留。更新狀態回到 `idle`，後端健康檢查回覆 200。第一次 install POST 在 HTTP 逾時前未被接受；唯讀狀態證明裝置仍為 0.3.20、staged sequence 未變且 `canInstall=true` 後，才由人工作出第二次送出決定。工具不得自行重試。
+
+2026-09-16，0.3.22 與 0.3.23 均依相同兩階段流程經原生 Tailscale 安裝。0.3.23 映像為 1,655,296 bytes、SHA-256 `bfc0cd6bda76850ed4c6c7e979fd72b55ccab8576f4a89618fc2f47096cb805a`；裝置重新上線後回報後端可達、5 個鬧鐘、方向 90°、亮度 25%、關屏 5 分鐘與原班表版次，更新狀態回到 `idle`。

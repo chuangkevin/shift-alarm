@@ -91,9 +91,9 @@ def test_reliability_contract_and_versions_are_wired():
     assert "displaySettingsValid" in source
     assert "settingsLoadValid" in source
     assert "ota_manifest::available" in source
-    assert 'set(PROJECT_VER "0.3.21")' in Path("firmware-next/CMakeLists.txt").read_text()
+    assert 'set(PROJECT_VER "0.3.23")' in Path("firmware-next/CMakeLists.txt").read_text()
     ota_fixture = Path("firmware-next/components/alarm_ota/tests/test_real_component.c").read_text()
-    assert ota_fixture.count('version="0.3.21"') == 2
+    assert ota_fixture.count('version="0.3.23"') == 2
     assert 'version="0.3.12"' not in ota_fixture
     assert "VERSION = '0.1.6'" in Path("app.py").read_text()
 
@@ -106,9 +106,13 @@ def test_physical_menu_draw_and_gpio_are_integrated():
     assert 'screen.drawRGBBitmap(0,0,pixels,240,240)' in source
     assert 'uiState.page==deviceui::Page::Main' in source
     assert 'uiState.page==deviceui::Page::Menu' in source
+    assert 'remoteOk&&backendOk?"遠端與後端連線正常":"連線異常不影響本機鬧鐘"' in source
+    assert 'line(8,154,"連線異常不影響本機鬧鐘")' not in source
     for label in ('手機設定', '連線狀態', '班表資訊', '裝置資訊', '檢查更新', '返回主畫面'):
         assert label in source
     assert '尚無下一次鬧鐘' in source
+    assert 'vTaskPrioritySet(nullptr,8)' in source
+    assert 'delay(2)' in source
     assert 'deviceui::countdown(now,next' in source
     assert 'BUTTON_STOP=0, BUTTON_SNOOZE=39, BUTTON_TEST=40' in source
     assert 'pinMode(BUTTON_STOP,INPUT_PULLUP)' in source
@@ -143,6 +147,12 @@ def test_physical_menu_draw_and_gpio_are_integrated():
     assert 'http://' not in main_draw
     assert 'alarm_tailnet_get_status' not in main_draw
     assert 'alarms.size()' not in main_draw
+
+
+def test_tft_font_contains_every_weekday_glyph():
+    glyphs = Path("firmware-next/main/zh_glyphs.h").read_text()
+    for character in "日一二三四五六（）":
+        assert f"{{{ord(character)}," in glyphs
 
 
 def test_backend_poll_requires_tailnet_before_http_allocation():

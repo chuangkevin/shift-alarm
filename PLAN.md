@@ -10,7 +10,8 @@ AI 接手規則見 `AGENTS.md`，準確現況見 `docs/AI接手開發.md`。
 - [x] Gemini `max_tokens` 預設 6000 且強制至少 400。
 - [x] 0.3.20 已用 USB 寫入非執行中分區，未改 NVS、bootloader 或 partition table。
 - [x] MicroLink priority peer 改為真正優先安裝；裝置後端改走 GN100 `100.127.82.47:8237`，GN100 再代理到 rpi-matrix。
-- [x] 0.3.21 已由 0.3.20 完成真實 Tailscale OTA。下載、staged 驗證、獨立安裝、重開、回連、後端健康與設定保存皆通過。
+- [x] 0.3.23 已經由真實 Tailscale OTA 完成下載、staged 驗證、獨立安裝、重開、回連、後端健康與設定保存檢查。
+- [x] 補齊 TFT 星期「二、四、六」字型，並提高介面迴圈優先權、縮短按鍵輪詢間隔。
 
 ## 目前可接續工作
 
@@ -19,6 +20,7 @@ AI 接手規則見 `AGENTS.md`，準確現況見 `docs/AI接手開發.md`。
 - [ ] 實測 staged 映像跨重開、部分下載重開從 0、斷網離線安裝。
 - [ ] 以真實網路中斷驗證 HTTP Range 續傳。
 - [ ] 實測 ADC2 channel 6、GPIO38 active-high 與充滿後 fail-closed 行為。
+- [ ] 現場確認 0.3.23 星期顯示完整，且三個實體按鍵操作沒有明顯延遲。
 
 ## 已知限制
 

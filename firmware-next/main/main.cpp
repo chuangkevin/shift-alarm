@@ -374,7 +374,7 @@ void draw() {
   } else {
     const int64_t now=time(nullptr),next=clockValid()?nextAlarmEpoch(now):INT64_MAX;alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);int percent=0;uint32_t age=0;const bool valid=battery::value(batteryState,millis(),percent,age);
     if(uiState.page==deviceui::Page::PhoneSetup){line(8,deviceui::TITLE_Y,"手機設定",2);if(WiFi.isConnected()){String url=String("http://")+WiFi.localIP().toString()+"/calendar";qr(url,deviceui::QR_X,deviceui::QR_Y,deviceui::QR_SCALE);line(deviceui::BOTTOM_TEXT_X,deviceui::BOTTOM_TEXT_Y,"掃碼設定班表");}else{line(8,48,"尚未連上無線網路");line(8,76,"按住左右鍵 10 秒");line(8,98,"再依畫面加入裝置熱點");line(8,126,"手機開啟 192.168.4.1");}}
-    else if(uiState.page==deviceui::Page::Connectivity){line(8,6,"連線狀態",2);line(8,42,String("目前網路：")+currentWifiSsid());line(8,68,String("已保存 ")+String(unsigned(wifiProfiles.count))+" 組");line(8,94,String("遠端連線：")+(tail.state==ALARM_TAILNET_CONNECTED?"已連線":"未連線"));line(8,120,String("後端服務：")+(backendReachableNow(millis())?"可連線":"無法連線"));line(8,154,"連線異常不影響本機鬧鐘");}
+    else if(uiState.page==deviceui::Page::Connectivity){const bool remoteOk=tail.state==ALARM_TAILNET_CONNECTED;const bool backendOk=backendReachableNow(millis());line(8,6,"連線狀態",2);line(8,42,String("目前網路：")+currentWifiSsid());line(8,68,String("已保存 ")+String(unsigned(wifiProfiles.count))+" 組");line(8,94,String("遠端連線：")+(remoteOk?"已連線":"未連線"));line(8,120,String("後端服務：")+(backendOk?"可連線":"無法連線"));lineColor(remoteOk&&backendOk?34:8,154,remoteOk&&backendOk?"遠端與後端連線正常":"連線異常不影響本機鬧鐘",1,remoteOk&&backendOk?0xaf7b:0xf800);}
     else if(uiState.page==deviceui::Page::Schedule){line(8,6,"班表資訊",2);if(scheduleStorageFault.load()){line(8,48,"班表儲存狀態不明");line(8,76,"重開前請勿修改");line(8,108,"目前僅沿用本次開機班表");}else{line(8,44,String("下次上班：")+(next==INT64_MAX?"尚無":dateWeek(next)));line(8,70,String("響鈴時間：")+(next==INT64_MAX?"--:--":alarmTime(next)));line(8,96,String("鬧鐘數量：")+String(unsigned(alarms.size())));line(8,122,String("儲存狀態：")+(revision.isEmpty()?"尚未儲存":localSchedule?"本機已儲存":"已同步"));line(8,148,String("版次：")+(revision.isEmpty()?"--":revision.substring(0,18)));}}
     else if(uiState.page==deviceui::Page::Device){line(8,6,"裝置資訊",2);line(8,48,String("韌體版本：")+VERSION);line(8,78,String("IP：")+(WiFi.isConnected()?WiFi.localIP().toString():"未連線"));line(8,108,String("電池：")+(valid?String(percent)+"%":"未知"));line(8,134,String("充電：")+(chargingInputValid?(charging.load()?"是":"否"):"未知"));}
     else if(uiState.page==deviceui::Page::Update){alarm_ota_status_t ota={};alarm_ota_get_status(&ota);line(8,deviceui::TITLE_Y,"檢查更新",2);if(WiFi.isConnected()){String url=String("http://")+WiFi.localIP().toString()+"/update";qr(url,deviceui::QR_X,deviceui::QR_Y,deviceui::QR_SCALE);const uint8_t detail=(millis()/2000)%4;if(detail==0)line(66,deviceui::BOTTOM_TEXT_Y,"掃碼開啟更新頁");else if(detail==1)line(66,deviceui::BOTTOM_TEXT_Y,String("目前：")+VERSION);else if(detail==2)line(ota.marker_fault?48:ota.staged_valid?66:72,deviceui::BOTTOM_TEXT_Y,ota.marker_fault?"已下載狀態異常":ota.staged_valid?String("已下載：")+ota.staged.manifest.version:"已下載：沒有");else line(60,deviceui::BOTTOM_TEXT_Y,String("充電：")+(chargingInputValid&&charging.load()?"可以安裝":"尚未就緒"));}else line(8,120,"連上無線網路後顯示條碼");}
@@ -991,6 +991,9 @@ void setup() {
   ESP_ERROR_CHECK(alarm_ota_boot_self_test(otaDiagnostics,nullptr,15000));
   otaReady=alarm_ota_init(&otaConfig)==ESP_OK;if(otaReady){esp_err_t staged=alarm_ota_load_staged();alarm_ota_status_t status={};alarm_ota_get_status(&status);if(staged!=ESP_OK||status.marker_fault){otaStateSet("marker-fault","marker-fault","更新記錄狀態不明，已封鎖下載與安裝");}else if(status.staged_valid){otaReceived=status.staged.manifest.size;otaTotal=status.staged.manifest.size;otaStateSet("staged","ready","已載入完整驗證的更新，可離線安裝");}else otaResetTerminalNoStaged();}
   Serial.printf("SHIFT_ALARM_READY v%s\n",VERSION);Serial.printf("PSRAM_BYTES %lu\n",(unsigned long)ESP.getPsramSize());Serial.println(wifiProfiles.count?"BOOT_WIFI_MODE SAVED":"BOOT_WIFI_MODE FIRST_SETUP");
+  // MicroLink has priority-7 workers on both cores.  Keep the UI loop one
+  // level above them so physical input remains responsive during Tailnet I/O.
+  vTaskPrioritySet(nullptr,8);
 }
 void loop() {
   sampleBattery(millis());
@@ -1040,5 +1043,5 @@ void loop() {
   const bool detailRefresh=uiState.page!=deviceui::Page::Main&&uiState.page!=deviceui::Page::Menu&&uint32_t(ms-lastDraw)>=1000;
   if(forceDraw||(ringing&&uint32_t(ms-lastDraw)>=200)||portalRefresh||pairingRefresh||mainMinute||detailRefresh){lastDraw=ms;draw();renderedMinute=now/60;}
   if(ms-lastSerial>=10000){lastSerial=ms;Serial.printf("STATUS setup=%d wifi=%d clock=%d alarms=%u ringing=%d\n",portal,WiFi.isConnected(),clockValid(),unsigned(alarms.size()),ringing);}
-  delay(10);
+  delay(2);
 }
