@@ -1,3 +1,5 @@
+import asyncio
+import json
 import os
 import tempfile
 os.environ['ALARM_DATA'] = tempfile.mkdtemp()
@@ -15,6 +17,46 @@ def test_recognition_token_budget_has_safe_minimum():
     assert app.recognition_token_budget('400') == 400
     assert app.recognition_token_budget('800') == 800
     assert app.recognition_token_budget('invalid') == 6000
+
+
+def test_recognition_models_are_ordered_and_deduplicated():
+    assert app.recognition_models('gemini-3.8-flash', 'gemini-flash,gemini-3.8-flash') == (
+        'gemini-3.8-flash', 'gemini-flash', 'go/deepseek-v4-flash-vision-exp'
+    )
+
+
+def test_recognition_switches_model_after_transient_failure(monkeypatch):
+    calls = []
+    days = [{'date': f'2026-09-{day:02}', 'source_label': '休假', 'classification': 'off'}
+            for day in range(1, 31)]
+
+    class Reply:
+        def __init__(self, status):
+            self.status_code = status
+
+        def json(self):
+            return {'choices': [{'message': {'content': json.dumps({'month': '2026-09', 'days': days})}}]}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, _url, headers, json):
+            calls.append(json['model'])
+            return Reply(503 if len(calls) == 1 else 200)
+
+    async def no_wait(_seconds):
+        pass
+
+    monkeypatch.setattr(app, 'NEWAPI_MODELS', ('primary-vision', 'backup-vision'))
+    monkeypatch.setattr(app.httpx, 'AsyncClient', lambda **_kwargs: Client())
+    monkeypatch.setattr(app.asyncio, 'sleep', no_wait)
+    result = asyncio.run(app.recognize(b'image', '2026-09'))
+    assert result.month == '2026-09'
+    assert calls == ['primary-vision', 'backup-vision']
 
 def month(m='2026-09'):
     return {'month': m, 'days': [{'date': d, 'source_label': '上班' if d.endswith('-13') else '休假', 'classification': 'work' if d.endswith('-13') else 'off'} for d in sorted(app.month_dates(m))]}

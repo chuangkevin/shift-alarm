@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError, model_validator
 
-VERSION = '0.1.6'
+VERSION = '0.1.7'
 TZ = ZoneInfo('Asia/Taipei')
 DATA = Path(os.environ.get('ALARM_DATA', './data'))
 DATA.mkdir(parents=True, exist_ok=True)
@@ -42,7 +42,14 @@ REMOTE_URL = os.environ.get('REMOTE_URL', 'https://alarm.sisihome.org')
 DEVICE_TOKEN = os.environ.get('DEVICE_TOKEN', '')
 NEWAPI_URL = os.environ.get('NEWAPI_URL', 'https://newapi.sisihome.org/v1').rstrip('/')
 NEWAPI_KEY = os.environ.get('NEWAPI_KEY', '')
-NEWAPI_MODEL = os.environ.get('NEWAPI_MODEL', 'gemini-flash')
+NEWAPI_MODEL = os.environ.get('NEWAPI_MODEL', 'go/deepseek-v4-flash-vision-exp')
+
+def recognition_models(primary: str, configured: str) -> tuple[str, ...]:
+    ordered = [primary, *configured.split(','), 'gemini-3.8-flash', 'gemini-flash',
+               'go/deepseek-v4-flash-vision-exp']
+    return tuple(dict.fromkeys(model.strip() for model in ordered if model.strip()))
+
+NEWAPI_MODELS = recognition_models(NEWAPI_MODEL, os.environ.get('NEWAPI_MODELS', ''))
 
 def recognition_token_budget(value: str) -> int:
     try:
@@ -526,10 +533,23 @@ async def recognize(raw, month):
                'messages': [{'role': 'system', 'content': prompt}, {'role': 'user', 'content': [
                    {'type': 'text', 'text': '請逐格擷取完整班表。'},
                    {'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' + base64.b64encode(raw).decode()}}]}]}
-    async with httpx.AsyncClient(timeout=httpx.Timeout(RECOGNITION_SECONDS, connect=8)) as client:
-        r = await client.post(NEWAPI_URL + '/chat/completions', headers={'Authorization': 'Bearer ' + NEWAPI_KEY}, json=payload)
-        if r.status_code != 200:
-            raise HTTPException(502, f'班表辨識服務回應 {r.status_code}，請稍後重試；原有鬧鐘不受影響')
+    deadline = time.monotonic() + RECOGNITION_SECONDS - 2
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=8)) as client:
+        attempt = 0
+        while True:
+            model = NEWAPI_MODELS[attempt % len(NEWAPI_MODELS)]
+            payload['model'] = model
+            r = await client.post(NEWAPI_URL + '/chat/completions', headers={'Authorization': 'Bearer ' + NEWAPI_KEY}, json=payload)
+            if r.status_code == 200:
+                break
+            if r.status_code not in (429, 500, 502, 503, 504):
+                raise HTTPException(502, f'班表辨識服務回應 {r.status_code}，請稍後重試；原有鬧鐘不受影響')
+            wait = min(10, attempt + 2)
+            recognition_log.warning('Recognition model %s returned %s; trying another route', model, r.status_code)
+            if time.monotonic() + wait >= deadline:
+                raise HTTPException(503, '所有圖片辨識模型目前忙碌，請稍後重試；原有鬧鐘不受影響')
+            attempt += 1
+            await asyncio.sleep(wait)
         try:
             text = r.json()['choices'][0]['message']['content']
             result = json.loads(text)

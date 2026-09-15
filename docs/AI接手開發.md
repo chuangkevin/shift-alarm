@@ -24,16 +24,18 @@
 |---|---|
 | 韌體原始碼 | 0.3.23，`firmware-next/` |
 | 在線裝置 | `shiftalarm-9ca8`，MAC `fc:01:2c:c9:9c:a8`，Tailnet `100.104.66.47` |
-| 後端 | rpi-matrix `100.126.226.79:8237`，版本 0.1.5 |
+| 後端 | rpi-matrix `100.126.226.79:8237`，版本 0.1.7 |
 | 裝置後端入口 | GN100 `100.127.82.47:8237`，只綁 Tailnet，Caddy 代理到 rpi-matrix |
 | 網域入口 | GN100 Caddy → ESP32 `100.104.66.47:80` |
-| AI | GN100 New API OpenAI-compatible `gemini-flash`；`max_tokens` 預設 6000、下限 400 |
+| AI | GN100 New API OpenAI-compatible；優先 `go/deepseek-v4-flash-vision-exp`，兩個 Gemini 路由備援；`max_tokens` 預設 6000、下限 400 |
 
 裝置已實測回報：0.3.23、後端可達、5 個鬧鐘、班表已同步、方向 90°、亮度 25%、關屏 5 分鐘、電池 100% 且充電中。班表 revision 是裝置資料，不應寫死在程式或文件。
 
 0.3.21 已由 0.3.20 做真實兩階段 OTA：先下載 1,653,056 bytes，裝置驗證 staged 版本；再獨立 install、重開、回連。上述顯示與班表設定全部保留，`/api/update` 回到 idle。第一次 install POST 因 Tailnet HTTP timeout 未被裝置接受；確認版本仍為 0.3.20、staged sequence 未變且 `canInstall=true` 後，才人工重送一次。工具本身不得自動重試 mutation。
 
 0.3.22 修正次級設定的連線頁：遠端與後端都正常時顯示「遠端與後端連線正常」，不再固定顯示異常警告。0.3.23 補回 TFT 字型表缺少的「二、四、六」，並把 Arduino 介面迴圈提高到 MicroLink priority-7 工作之上、輪詢間隔縮短為 2 ms。0.3.22 → 0.3.23 的兩階段 OTA、重開、回連與保存設定檢查已通過；星期顯示及實體按鍵體感仍需現場目視與操作確認。
+
+後端 0.1.7 不再因單次 Gemini 503 立即結束辨識。它會對 429／500／502／503／504 在整體辨識期限內有限重試，並依序切換 `NEWAPI_MODELS`。2026-09-16 兩個 Gemini 路由同時持續回 503，因此 New API 的 `shift-alarm` token 已增加 `go/deepseek-v4-flash-vision-exp`；該模型已用九月班表圖片實測能讀取月份與上班日。其他 4xx 仍立即回報，避免把設定或授權錯誤當成暫時壅塞。
 
 ## 這次修正的根因
 

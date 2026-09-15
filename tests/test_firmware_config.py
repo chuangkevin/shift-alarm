@@ -95,7 +95,7 @@ def test_reliability_contract_and_versions_are_wired():
     ota_fixture = Path("firmware-next/components/alarm_ota/tests/test_real_component.c").read_text()
     assert ota_fixture.count('version="0.3.23"') == 2
     assert 'version="0.3.12"' not in ota_fixture
-    assert "VERSION = '0.1.6'" in Path("app.py").read_text()
+    assert "VERSION = '0.1.7'" in Path("app.py").read_text()
 
 
 def test_physical_menu_draw_and_gpio_are_integrated():
