@@ -2,23 +2,100 @@
 
 這份文件讓新的 AI 在只收到「請確認 alarm-shift 後接手開發」時，可以自行辨認專案、確認現況並安全接續。正式儲存庫名稱是 `shift-alarm`；`alarm-shift` 是使用者可能使用的別名。
 
-## 現況基準
+## 1. 系統資料流
 
-- GitHub：`git@github.com:chuangkevin/shift-alarm.git`，預設分支 `main`。
-- 實機韌體：0.3.8。已用 USB 僅寫入非執行中的 app0 與單一 OTA 選擇 sector；重開後 Wi-Fi、Tailscale、方向、關屏、亮度、班表與鬧鐘均保留；目前為 90°、5 分鐘關屏、25% 亮度。
-- 後端部署於 `rpi-matrix:/home/kevin/DockerCompose/shift-alarm`，只提供辨識、心跳與私有韌體。Gemini `max_tokens` 預設 6000、強制下限 400。
-- 後端 0.1.5 與 GN100 Caddy 離線 fallback 已部署。第二台已經 USB 啟動 0.3.13 並保存兩組不同 Wi-Fi profile；重開仍為 saved mode，無 panic／boot loop／storage fault。第一台仍為 0.3.8。
-- 目前韌體原始碼與第二台：`firmware-next/` 0.3.13，ESP-IDF 5.3.2 / Arduino 3.1.3。
-- `firmware/` 是歷史版本，只供追查，不是更新來源。
-- 裝置後端固定為 Tailscale 位址 `100.126.226.79:8237`。裝置自己的 Tailscale IP 可能因重新授權而改變，部署前必須讀取當下狀態，不可只抄舊紀錄。
+```text
+手機 ──同一 Wi-Fi / HTTP 80──> ESP32
+                                  │
+                                  └──原生 Tailscale──> 私有後端 :8237 ──> New API / Gemini
+```
 
-0.3.8 的已驗收功能包括：首次 QR 配網、換 Wi-Fi、port 80 本機月曆與時／分選擇器、圖片辨識草稿、每三小時校時與手動校時、四方向旋轉、持久關屏時間／亮度與永久開啟、任一鍵喚醒／停鈴、鬧鐘強制亮屏、跨月「連續上班只通知第一天」、後續日期外框、每筆時間獨立開關、持續心跳，以及依臺北時間標示今天的紅點與細紅框。今天標記每分鐘原地更新，不重建日期按鈕。OTA 最多三次 Range 續傳已通過 host 測試，尚待下一次實機 OTA 驗收。
+- 手機不必加入 Tailnet。ESP32 必須自行加入 Tailnet，才能使用 AI 圖片辨識與 OTA。
+- 手動月曆、鬧鐘、時鐘、顯示設定都存在裝置，Tailscale 或後端不通時仍可操作與響鈴。
+- `https://alarm.sisihome.org` 由 GN100 Caddy 代理第一台 ESP32 的 Tailnet port 80，根路徑轉 `/calendar`；裝置離線時改由後端顯示唯讀離線頁。裝置區網 IP 也開同一個 `/calendar`，兩者必須是同一份 ESP32 頁面。
 
-0.3.12 延續 0.3.11 的 GPIO38 更新 gate、240×240 主畫面、六項選單、三鍵狀態機與 STA MAC 尾碼，並新增最多四組 Wi-Fi、斷線掃描 failover 與網頁管理。健康連線不主動切換；Wi-Fi 密碼不進 API、頁面或 log。`alarm_nvs` 目前未加密，密碼依硬體政策以裝置本機 plaintext-at-rest 保存。硬體 GPIO38、Wi-Fi failover、完整映像跨重開、離線安裝、實體 UI／按鍵與 live OTA 尚未驗證。
+## 2. 現況基準（2026-09-15）
 
-0.3.13 在 Tailnet 連線前略過後端輪詢；連線後由獨立 bounded worker 執行 schedule GET 與 heartbeat POST，Arduino 主迴圈只建立 immutable snapshot 並套用 generation、Wi-Fi、Tailnet 與 OTA 狀態仍有效的結果。所有實體 QR 統一使用 version 8、scale 3，完整四模組 quiet zone 為 171×171 並置中於 240×240 邏輯畫面。第二台刷入與實體 QR 掃描仍待驗證。
+### 版本
 
-## 接手後立即執行
+| 項目 | 版本 | 狀態 |
+|---|---|---|
+| 韌體原始碼 `firmware-next/` | 0.3.17 | 已建置，**尚未安裝到任何裝置** |
+| 第一台裝置 | 0.3.8 | 離線中（`shiftalarm-01fc`） |
+| 第二台裝置 | 0.3.16 | 在線，可操作 |
+| 主要後端 `:8237` | 0.1.5 | 已部署 |
+| 第二台專用後端 `:8238` | 0.1.6 | 已部署（隔離環境） |
+| GN100 Caddy 離線 fallback | — | 已部署 |
+
+### 分支
+
+- `main` 最新：`29c2d09`
+- 未合併分支：`fix/tailnet-ui-latency` 最新 `2a46656`，領先 `main` 4 個 commit
+  - `5ebcd40` 降低 Tailnet 逐封包日誌
+  - `93088d9` AI proxy 改走裝置設定的後端位址與 port
+  - `142e135` 放寬辨識預算與上傳尺寸（後端 0.1.6）
+  - `2a46656` OTA 失敗根因研究
+
+### 裝置
+
+- 第一台：`shiftalarm-01fc`，Tailnet `100.90.212.116`，目前離線。`alarm.sisihome.org` 代理的是這一台。
+- 第二台：`shiftalarm-9ca8`，USB MAC `fc:01:2c:c9:9c:a8`，Tailnet `100.104.66.47`。
+  - 已保存兩組 Wi-Fi（`Mark`、`PETER-2.4G`），重開仍為 saved mode。
+  - 目前 `alarmCount=0`、電池 100 %、充電中。
+  - 接的是手機熱點，Tailscale 走 DERP relay（`direct connection not established`），小請求要 12–40 秒。
+
+### 後端與代理
+
+- 兩台後端都在 `rpi-matrix`（`100.126.226.79`）。
+  - 主要：`/home/kevin/DockerCompose/shift-alarm`，容器 `shift-alarm`，映像 `shift-alarm:0.1.5`，port 8237。
+  - 第二台專用隔離環境：`/home/kevin/DockerCompose/shift-alarm-test-fc012cc99ca8`（`source/`、`build/`、`data/`、`private-build-*`、`.env`），容器 `shift-alarm-test-fc012cc99ca8`，映像 `shift-alarm:0.1.6`，port 8238。
+  - 隔離環境使用獨立 `DEVICE_TOKEN` 與獨立資料目錄，不可與主要環境互換。
+- GN100（`100.127.82.47`）跑 Caddy，設定來自 `homelab-docs/infra/caddy/`。
+
+## 3. 最優先工作：OTA 為什麼一直失敗
+
+完整研究在 [docs/ota-research.md](ota-research.md)。摘要：
+
+**根因**：`main.cpp:980` 的主迴圈每約 10 ms 執行 `alarm_ota_maintenance()`。它在傳輸途中重跑安全檢查，任何一項瞬間不成立就 `discard_transfer()`（`alarm_ota.c:454`、`61`），中止 OTA、進度歸零；下一次寫入拿到 `ESP_ERR_INVALID_STATE` 而中止。
+
+**安全檢查條件**：時鐘、班表就緒、充電中、未響鈴、未貪睡，以及下一次鬧鐘不在 300 秒內。
+
+**被誤導的地方**：`main.cpp:765,768` 把任何非充電中斷的失敗都寫成「更新寫入或安全檢查失敗」＋`lastReason=resume-failed`。所以 `resume-failed`、`reconnectCount=0`、`lastHttpStatus=200` 都不是續傳問題。先前調後端 chunk 大小與節奏的方向是錯的。
+
+**對得上既有現象**：第一台有 15 個鬧鐘，300 秒 quiet window 必然被打到，所以四次失敗停在 `1,309,111`／`356,671`／`760,496`／`358,736` 等不同位置。第二台沒有鬧鐘，最可能是滿電時 GPIO38 充電訊號瞬斷（推論，待序列紀錄確認）。
+
+**另一個獨立缺陷**：`backend_poll_policy.h:43` 讓 OTA 在輪詢進行時一律拒絕。實測 51 次取樣只有 3 次 `canDownload=true`，慢速線路上 OTA 幾乎永遠打不開。另外 `alarm_ota.c:55` 的 `lock()` 是 0 逾時，短暫競用就會讓該次寫入失敗。
+
+**後端已排除**：完整 1,648,432 bytes 本機下載 0.49 秒，`Range: bytes=4096-` 正確回 `206`。
+
+### 修正清單（都需要新的韌體）
+
+1. 護欄失敗改為暫停並等待條件恢復，不要丟棄整個傳輸。
+2. 充電訊號去彈跳：連續數秒都非充電才視為拔電。
+3. 原因碼細分：寫入失敗、狀態失效、時鐘不可信、鬧鐘接近、充電中斷要分開。
+4. OTA 進行時暫停後端輪詢，而不是用 `backend-poll-busy` 拒絕。
+5. 寫入路徑的 `lock()` 改為有界等待，不要 0 逾時。
+6. 600 秒傳輸期限在量到實際吞吐後再決定是否調整。
+
+### 驗證計畫（一次 USB 就夠）
+
+1. USB 寫入帶診斷的版本，序列輸出每一項護欄結果。
+2. 故意設一個 4 分鐘後的鬧鐘，確認傳輸是暫停恢復而不是中止。
+3. 滿電狀態跑一次 OTA，確認充電抖動不會中止傳輸。
+4. 之後量裝置到後端的實際吞吐，決定 1.6 MB 是否可能。
+
+## 4. 目前裝置端尚未驗證的功能
+
+以下都只有原始碼、host 測試與建置證據，沒有實機驗收：
+
+- GPIO38 充電判定與 fail-closed 行為
+- 240×240 主畫面、六項選單、三鍵短按／長按／配網 chord、15 秒返回
+- 四種大型 QR（配網、設定、`/calendar`、`/update`）在四個方向的可掃描性
+- 兩組 Wi-Fi 的實際 failover、管理頁新增／移除
+- staged 映像跨重開保存、部分下載重開從 0、離線安裝
+- 新版 OTA 的完整下載／安裝
+
+## 5. 接手後立即執行
 
 ```sh
 git status --short --branch
@@ -57,19 +134,22 @@ idf.py -C firmware-next size
 
 先讀取所有命令結果。若工作樹已有變更，保留並判斷來源；不可 `reset --hard`、`clean -fd` 或用遠端覆蓋。若遠端領先，先理解差異後以 fast-forward 或 rebase 整合。測試或建置失敗時，不發布韌體。
 
-## 系統資料流
+## 6. 私有建置與 USB 寫入
 
-```text
-手機 ──同一 Wi-Fi / HTTP 80──> ESP32
-                                  │
-                                  └──原生 Tailscale──> 私有後端 :8237 ──> New API / Gemini
+- 私有映像在隔離環境的 `source/` 內建置；`firmware-next/main/provisioning.h` 只存在該處與正式環境，不進 Git。
+- 建置指令（在 `rpi-matrix`）：
+
+```sh
+docker run --rm --user 1000:1000 -e HOME=/tmp/idf-home \
+  -v <隔離環境>/source:/project -v <隔離環境>/build:/build -w /project \
+  espressif/idf:v5.3.2 bash -lc '. /opt/esp/idf/export.sh >/dev/null && idf.py -C firmware-next -B /build build'
 ```
 
-手機不必加入 Tailnet。ESP32 必須自行加入 Tailnet，才能使用 AI 圖片辨識與 OTA。手動月曆及鬧鐘直接保存在裝置，即使 Tailscale 未連線也可操作與響鈴。
+- 發布到裝置可抓的 manifest：`python3 deploy/publish_firmware.py <app.bin> --release-dir <data>/releases`。
+- USB 寫入（Mac）：裝置為 `/dev/cu.usbmodem12201`。寫入前先 `read-mac` 確認是 `fc:01:2c:c9:9c:a8`，只寫 `0x10000` app0，不碰 bootloader、partition table、NVS、`alarm_nvs`。
+- 刷寫前先重新備份整顆 16 MB flash。先前的備份在 `/var/folders/.../T/opencode/shift-alarm-fc012cc99ca8-backup.bin`，屬暫存目錄，可能已被清除。
 
-`https://alarm.sisihome.org` 由 GN100 Caddy 直接代理 ESP32 的 Tailscale port 80，根路徑轉 `/calendar`；裝置區網 IP 也開同一個 `/calendar`。兩者必須保持為同一份 ESP32 頁面，不能再把 rpi-matrix 後端首頁當成第二套管理介面。
-
-## 私密檔案邊界
+## 7. 私密檔案邊界
 
 下列檔案可能存在於開發機，但已被 Git 排除：
 
@@ -80,9 +160,11 @@ idf.py -C firmware-next size
 - `firmware-next/build/`
 - `firmware/.pio/`
 
+隔離測試環境的 `.env`、`source/firmware-next/main/provisioning.h`、`private-build-*/` 同樣視為私密，不可複製回儲存庫或輸出內容。
+
 不可讀出或貼出其中秘密來「確認設定」。只確認檔案是否存在、權限是否正確及 Git 是否忽略。公開儲存庫只能保存 `provisioning.example.h` 的假值。新增設定時，同步更新 `.gitignore`、範本和這份清單。
 
-## 開發與交付定義
+## 8. 開發與交付定義
 
 每一項變更至少要做到：
 
@@ -91,6 +173,10 @@ idf.py -C firmware-next size
 3. 執行相關 host 測試與完整後端測試；韌體改動完成 ESP-IDF 建置。
 4. 提高韌體版本，且只把無憑證建置視為公開產物。實機映像保持私有。
 5. 若使用者要求部署，嚴格依 `docs/更新部署.md` 與 `docs/Tailscale-OTA.md`；先預檢，再一次安裝，最後驗收保存資料與實體功能。
-6. 更新 README、PLAN 與部署紀錄，提交後用 SSH 推送；確認 `HEAD`、`origin/main` 與 GitHub 公開頁面的 commit 一致。
+6. 更新 README、PLAN 與部署紀錄，提交後推送；確認 `HEAD`、`origin/main` 與 GitHub 公開頁面的 commit 一致。
 
-沒有明確新需求時，以 `PLAN.md` 第一個仍適用的未完成工作為預設。若清單為空，只進行唯讀健康檢查並回報，不任意更改實機。
+## 9. 回報原則
+
+- 只把已實測的結果寫成「已完成」。程式完成、測試通過、CI 綠燈都不等於實機可用。
+- 無法驗證時明確寫「未驗證」與原因，不要用模糊字眼讓使用者以為已修好。
+- 同一條路徑連續失敗時，先停下來把失敗原因做細，不要連續更換策略硬試。

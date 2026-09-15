@@ -20,6 +20,7 @@ AI 接手規則見 `AGENTS.md`，完整現況見 `docs/AI接手開發.md`。以�
 
 ## 目前可接續工作
 
+- [ ] 依 `docs/ota-research.md` 修 OTA：護欄失敗改暫停恢復、充電去彈跳、原因碼細分、OTA 期間暫停輪詢、寫入 lock 改有界等待。完成後以一次 USB 寫入 0.3.18，再依研究文件的驗證計畫實測。
 - [ ] 實機驗證 ADC2 channel 6 曲線、GPIO38 active-high 充電狀態及充滿後 fail-closed 拒絕行為。
 - [ ] 第二台裝置實機驗證 240×240 主畫面、六項選單、QR、四方向、按鍵 debounce／長按／配網 chord、響鈴優先及 15 秒返回。
 - [ ] 實測配網加入、設定網址、`/calendar` 與 `/update` 四種大型 QR 在 0／90／180／270 度均可掃描且不裁切。
@@ -39,3 +40,5 @@ AI 接手規則見 `AGENTS.md`，完整現況見 `docs/AI接手開發.md`。以�
 - 0.3.8 對 1,617,664-byte 映像的兩次明確單次下載，分別在 1,309,111 與 356,671 bytes 停止；後端 0.1.4 paced stream 部署後，第三次 POST 在開始前被斷線，裝置狀態未重置。三次均未完成，裝置保持 0.3.8 與原設定；停止 OTA 重送，改走 USB bootstrap。
 - 第四次由 GN100 送出控制請求後，0.3.8 在 760,496 bytes 停止；後端 0.1.5 改為 4 KiB 連續串流後，第五次仍在 358,736 bytes 停止。server 端三種 chunk 策略均重現裝置端 `read()==0` 即中止；停止 OTA 重送，唯一下一步是第二台裝置以 Mac USB 資料線 bootstrap 目前候選 0.3.12。
 - 0.3.13 尚待刷入第二台；GPIO38 gate、staged flash、離線安裝、實體 TFT 排版與按鍵、四組 Wi-Fi failover、真實 Range reconnect、全部大型 QR 與 live OTA 尚未在硬體／實際網路驗證。原始碼、host 測試或建置通過不代表已部署。
+- 2026-09-15 OTA 根因已定位：傳輸途中 `alarm_ota_maintenance()` 每約 10 ms 重跑安全檢查，任一項瞬斷就丟棄整個傳輸，錯誤訊息又把原因偽裝成 `resume-failed`。先前調整後端 chunk 大小與節奏並非有效方向。詳見 `docs/ota-research.md`。
+- 第二台 0.3.16 在線，接手機熱點走 DERP relay；OTA 下載閘門 `backend-poll-busy` 幾乎永遠擋住下載（51 次取樣只 3 次可下載）。修正需要新韌體，因此必須 USB 一次。
