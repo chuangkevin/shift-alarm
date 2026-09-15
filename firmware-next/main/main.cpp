@@ -13,6 +13,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
+#include "backend_endpoint.h"
 #include <DNSServer.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
@@ -963,7 +964,11 @@ void setup() {
   i2s_pin_config_t pins={};pins.mck_io_num=I2S_PIN_NO_CHANGE;pins.bck_io_num=15;pins.ws_io_num=16;pins.data_out_num=7;pins.data_in_num=I2S_PIN_NO_CHANGE;
   ESP_ERROR_CHECK(i2s_driver_install(I2S_NUM_0,&cfg,0,nullptr));ESP_ERROR_CHECK(i2s_set_pin(I2S_NUM_0,&pins));if(xTaskCreatePinnedToCore(soundTask,"speaker",3072,nullptr,2,nullptr,0)!=pdPASS)abort();
   alarm_ota_config_t otaConfig={};otaConfig.board_id="xingzhi-cube-1.54tft-wifi";otaConfig.device_token=(const uint8_t*)token.c_str();otaConfig.device_token_length=token.length();otaConfig.quiet_window_seconds=300;otaConfig.transfer_timeout_seconds=600;otaConfig.authorize=otaAuthorize;otaConfig.read_guard=otaReadGuard;otaConfig.marker_load=otaMarkerLoad;otaConfig.marker_store=otaMarkerStore;otaConfig.marker_clear=otaMarkerClear;
-  ESP_ERROR_CHECK(alarm_proxy_init("100.126.226.79",8237));scheduleWorkReady=initScheduleWorker();if(!scheduleWorkReady&&!scheduleStorageFault.load())syncState="班表背景儲存無法使用";backendPollReady=initBackendPoll();if(!backendPollReady&&!scheduleStorageFault.load())syncState="後端服務無法使用";
+  backendendpoint::Endpoint endpoint;
+  if(backendendpoint::parse(backend.c_str(),endpoint)){
+    ESP_ERROR_CHECK(alarm_proxy_init(endpoint.host,endpoint.port));
+  }
+  scheduleWorkReady=initScheduleWorker();if(!scheduleWorkReady&&!scheduleStorageFault.load())syncState="班表背景儲存無法使用";backendPollReady=initBackendPoll();if(!backendPollReady&&!scheduleStorageFault.load())syncState="後端服務無法使用";
   setenv("TZ","CST-8",1);tzset();WiFi.persistent(false);WiFi.mode(WIFI_STA);WiFi.setAutoReconnect(false);wifiState.phase_started_ms=millis();wifiState.retry_delay_ms=0;if(wifiProfiles.count)startWifiScan(millis());else startPortal();
   esp_sntp_set_time_sync_notification_cb(networkClockSynced);esp_sntp_set_sync_interval(CLOCK_SYNC_INTERVAL_MS);configTime(8*3600,0,"pool.ntp.org","time.google.com");routes();proxyStarted=alarm_proxy_start()==ESP_OK;bootMs=millis();draw();
   ESP_ERROR_CHECK(alarm_ota_boot_self_test(otaDiagnostics,nullptr,15000));
