@@ -43,7 +43,12 @@ int main() {
   assert(batteryDisplay(true, 20).warning && batteryDisplay(true, 20).show_marker);
   assert(!batteryDisplay(true, 21).warning);
 
-  assert(qrQuietRight(PHONE_QR_X, QR_VERSION_8_MODULES, PHONE_QR_SCALE) == 113);
-  assert(PHONE_TEXT_X - qrQuietRight(PHONE_QR_X, QR_VERSION_8_MODULES,
-                                     PHONE_QR_SCALE) >= PHONE_QR_SCALE * 4);
+  assert(QR_SCALE == 3);
+  assert(QR_QUIET_SIZE == 171);
+  assert(qrModuleLeft() >= 0 && qrModuleTop() >= 0);
+  assert(qrModuleRight() <= SCREEN_MAX && qrModuleBottom() <= SCREEN_MAX);
+  assert(qrQuietLeft() >= 0 && qrQuietTop() >= 0);
+  assert(qrQuietRight() <= SCREEN_MAX && qrQuietBottom() <= SCREEN_MAX);
+  assert(TITLE_BOTTOM < qrQuietTop());
+  assert(BOTTOM_TEXT_Y > qrQuietBottom() && BOTTOM_TEXT_Y <= SCREEN_MAX);
 }

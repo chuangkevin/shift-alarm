@@ -23,7 +23,7 @@ python3 deploy/ota_tailnet.py \
   --device http://裝置-Tailscale-IP \
   --backend http://100.126.226.79:8237 \
   --token-file /私有路徑/device-token.txt \
-  --version 0.3.12 --download --wait-seconds 900
+  --version 0.3.13 --download --wait-seconds 900
 ```
 
 下載完成後不會重開。完整大小、stream SHA-256、`esp_ota_end` 與 image descriptor 通過後，裝置把小型 authenticated marker 寫入既有 `alarm_nvs`。映像留在 inactive OTA slot，不把 binary 放進 NVS。
@@ -33,7 +33,7 @@ python3 deploy/ota_tailnet.py \
 ```sh
 python3 deploy/ota_tailnet.py \
   --device http://裝置-Tailscale-IP \
-  --version 0.3.12 --install --wait-seconds 900
+  --version 0.3.13 --install --wait-seconds 900
 ```
 
 安裝會重新驗 manifest/marker HMAC，從 partition table 推導 inactive slot，確認 marker target 相符且不是 running slot，從 flash 重讀完整映像計算 SHA-256，重讀 board/version descriptor，並在驗證期間及 boot selection 前重查充電、時鐘、排程與鬧鐘 guard。清除 marker 成功後才選擇 boot partition。若 boot selection 失敗，裝置留在目前版本並要求重新下載。
@@ -69,4 +69,4 @@ sh firmware-next/components/alarm_ota/tests/run_host_tests.sh
 python3 firmware-next/components/alarm_ota/tests/test_manifest_contract.py
 ```
 
-0.3.12 目前只有來源碼、host tests 與 credential-free build 證據。GPIO38 真實行為、四組 Wi-Fi failover、240×240 實體畫面與按鍵、real-flash staged image、跨重開保存、離線安裝及 live OTA，均須由第二台裝置在線且供電後實測；不得把 host 結果記成硬體驗收。
+0.3.13 會在 Tailnet 連線後才同步輪詢後端，並把所有實體 QR 放大為 scale 3。目前只有來源碼、host tests 與 credential-free build 證據，尚待刷入第二台。GPIO38 真實行為、四組 Wi-Fi failover、240×240 實體畫面與按鍵、real-flash staged image、跨重開保存、離線安裝及 live OTA，均須由第二台裝置在線且供電後實測；不得把 host 結果記成硬體驗收。

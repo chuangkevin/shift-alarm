@@ -1,6 +1,7 @@
 #include "ota_download_policy.h"
 #include "battery_policy.h"
 #include "connectivity_policy.h"
+#include "backend_poll_policy.h"
 #include "wifi_profiles.h"
 #include "wifi_failover_policy.h"
 #include "wifi_page.h"
@@ -34,6 +35,8 @@
 #include <vector>
 #include <algorithm>
 #include <atomic>
+#include <new>
+#include "freertos/queue.h"
 #include "scheduler.h"
 #include "alarm_tailnet.h"
 #include "alarm_ota.h"
@@ -45,15 +48,16 @@
 #include "zh_glyphs.h"
 #include "clock_page.h"
 #include "screen_policy.h"
+#include "schedule_candidate.h"
 
 const char *const VERSION=esp_app_get_description()->version;
-constexpr size_t MAX_ALARMS=512, MAX_JSON=98304;
+constexpr size_t MAX_ALARMS=schedulecandidate::MAX_ALARMS, MAX_JSON=schedulecandidate::MAX_BYTES;
 constexpr uint32_t POLL_MS=5000, RING_MS=180000;
 constexpr uint32_t CLOCK_SYNC_INTERVAL_MS=3UL*60*60*1000;
 std::atomic<uint32_t> lastNetworkClock{0},lastNetworkClockMs{0};
 void networkClockSynced(struct timeval *tv){lastNetworkClock=uint32_t(tv->tv_sec);lastNetworkClockMs=millis();}
 constexpr int BUTTON_STOP=0, BUTTON_SNOOZE=39, BUTTON_TEST=40;
-struct Alarm { String id,label; int64_t epoch; };
+using Alarm=schedulecandidate::Alarm;
 std::vector<Alarm> alarms;
 Preferences prefs;
 WebServer server(IPAddress(127,0,0,1),8081);
@@ -61,7 +65,8 @@ DNSServer dns;
 String apName,setupNonce;
 wifiprofiles::SensitiveText<wifiprofiles::MAX_SSID_BYTES> pendingSsid;
 wifiprofiles::SensitiveText<wifiprofiles::MAX_PASSWORD_BYTES> pendingPassword;
-bool connecting=false, setupFailed=false, showJoinQr=true;
+bool connecting=false, setupFailed=false;
+uint8_t portalView=0;
 uint32_t connectStarted=0,apCloseAt=0;
 String lastCommand;
 bool tailnetStarted=false,proxyStarted=false;
@@ -71,6 +76,25 @@ uint32_t tailnetAttempt=0;
 std::atomic<uint32_t> backendLastSuccessMs{0};
 std::atomic<bool> backendLastResult{false};
 std::atomic<bool> backendHasSuccess{false};
+constexpr size_t BACKEND_URL_CAP=192,BACKEND_TOKEN_CAP=256,REVISION_CAP=192,HEARTBEAT_CAP=1024;
+struct BackendPollExchange {
+  backendpoll::Ticket ticket{};
+  bool fetch_schedule=false,schedule_body_valid=false,heartbeat_ok=false;
+  int schedule_status=0;
+  char backend[BACKEND_URL_CAP]={},token[BACKEND_TOKEN_CAP]={},revision[REVISION_CAP]={},heartbeat[HEARTBEAT_CAP]={};
+  String schedule_body;
+};
+backendpoll::State backendPollState;
+QueueHandle_t backendRequestQueue=nullptr,backendResultQueue=nullptr;
+std::atomic<uint32_t> backendDroppedGeneration{0};
+bool backendPollReady=false,backendPollObservedOtaBusy=false;
+enum class ScheduleOrigin:uint8_t{Backend,Local,Direct,Rollback,Cleanup};
+struct ScheduleWork {uint32_t id=0,schedule_generation=0,backend_generation=0;ScheduleOrigin origin=ScheduleOrigin::Backend;String input,previous,error;schedulecandidate::Candidate candidate;bool persisted=false;};
+QueueHandle_t scheduleRequestQueue=nullptr,scheduleResultQueue=nullptr;
+bool scheduleWorkReady=false,scheduleWorkBusy=false;uint32_t scheduleWorkId=0,scheduleGeneration=0,localSaveId=0;String localSaveState="idle",localSaveMessage;
+std::atomic<uint32_t> scheduleDroppedId{0};
+std::atomic<bool> scheduleStorageFault{false};
+bool scheduleStorageFaultObserved=false;
 // Prevent Arduino from confirming a pending image before application diagnostics.
 extern "C" bool verifyRollbackLater(){return true;}
 
@@ -84,7 +108,7 @@ wifiprofiles::Selector wifiSelector;
 bool wifiSelectorValid=false,wifiStorageFault=false;
 int64_t handled=0,snooze=0;
 volatile bool ringing=false;
-uint32_t ringStarted=0,lastPoll=0,lastDraw=0,lastSerial=0,bootMs=0;
+uint32_t ringStarted=0,lastDraw=0,lastSerial=0,bootMs=0;
 bool portal=false;
 uint32_t pairingHoldStarted=0;
 bool pairingHoldActive=false;
@@ -322,11 +346,14 @@ void draw() {
   if(ringing){
     line(36,52,"鬧鐘響了",2);line(24,104,ringLabel,1);line(18,166,"按任一按鈕停止",2);
   } else if(portal&&!(WiFi.isConnected()&&apCloseAt)){
-    line(8,6,"手機設定",2);line(8,38,showJoinQr?"掃碼加入裝置熱點":"掃碼開啟設定頁");
-    String text=showJoinQr?String("WIFI:T:WPA;S:")+apName+";P:"+apPassword+";;":"http://192.168.4.1";
-    qr(text,deviceui::PHONE_QR_X,70,deviceui::PHONE_QR_SCALE);line(deviceui::PHONE_TEXT_X,76,apName);line(deviceui::PHONE_TEXT_X,96,showJoinQr?String("密碼：")+apPassword:"192.168.4.1");
-    line(deviceui::PHONE_TEXT_X,132,"右鍵切換條碼");line(deviceui::PHONE_TEXT_X,154,connecting?"正在連線":setupFailed?"連線失敗，請重試":"加入後開啟設定");
-    line(8,220,"按住左右鍵 10 秒可重新配網");
+    line(8,deviceui::TITLE_Y,"手機設定",2);
+    if(portalView<2){
+      String text=portalView==0?String("WIFI:T:WPA;S:")+apName+";P:"+apPassword+";;":"http://192.168.4.1";
+      qr(text,deviceui::QR_X,deviceui::QR_Y,deviceui::QR_SCALE);
+      line(portalView==0?48:42,deviceui::BOTTOM_TEXT_Y,portalView==0?"右鍵切換 · 掃碼加入":"右鍵切換 · 掃碼設定");
+    }else{
+      line(8,54,"無法掃碼時手動加入");line(8,88,String("熱點：")+apName);line(8,116,String("密碼：")+apPassword);line(8,150,"設定頁：192.168.4.1");line(8,184,connecting?"正在連線":setupFailed?"連線失敗，請重試":"右鍵返回條碼");
+    }
   } else if(uiState.page==deviceui::Page::Main){
     const int64_t now=time(nullptr);time_t current=now;tm local={};localtime_r(&current,&local);char date[40];if(clockValid())snprintf(date,sizeof(date),"%02d/%02d（%s）",local.tm_mon+1,local.tm_mday,weekday(local).c_str());else snprintf(date,sizeof(date),"--/--");lineColor(6,6,date,1,0xce79);
     int percent=0;uint32_t age=0;const bool valid=battery::value(batteryState,millis(),percent,age);const auto batteryUi=deviceui::batteryDisplay(valid,percent);const uint16_t color=batteryUi.warning?0xf800:0xffff;
@@ -345,12 +372,13 @@ void draw() {
     for(uint8_t i=0;i<deviceui::MENU_ITEM_COUNT;i++){const int y=38+i*30;if(i==uiState.selection){surface.fillRect(6,y-3,228,27,0xaf7b);lineColor(18,y,String("> ")+items[i],1,0x1103);}else{surface.drawRect(6,y-3,228,27,0x31e7);line(18,y,String("  ")+items[i]);}}
   } else {
     const int64_t now=time(nullptr),next=clockValid()?nextAlarmEpoch(now):INT64_MAX;alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);int percent=0;uint32_t age=0;const bool valid=battery::value(batteryState,millis(),percent,age);
-    if(uiState.page==deviceui::Page::PhoneSetup){line(8,6,"手機設定",2);if(WiFi.isConnected()){String url=String("http://")+WiFi.localIP().toString()+"/calendar";line(8,38,url);qr(url,deviceui::PHONE_QR_X,72,deviceui::PHONE_QR_SCALE);line(deviceui::PHONE_TEXT_X,82,"掃碼設定班表");}else{line(8,48,"尚未連上無線網路");line(8,76,"按住左右鍵 10 秒");line(8,98,"再依畫面加入裝置熱點");line(8,126,"手機開啟 192.168.4.1");}}
+    if(uiState.page==deviceui::Page::PhoneSetup){line(8,deviceui::TITLE_Y,"手機設定",2);if(WiFi.isConnected()){String url=String("http://")+WiFi.localIP().toString()+"/calendar";qr(url,deviceui::QR_X,deviceui::QR_Y,deviceui::QR_SCALE);line(deviceui::BOTTOM_TEXT_X,deviceui::BOTTOM_TEXT_Y,"掃碼設定班表");}else{line(8,48,"尚未連上無線網路");line(8,76,"按住左右鍵 10 秒");line(8,98,"再依畫面加入裝置熱點");line(8,126,"手機開啟 192.168.4.1");}}
     else if(uiState.page==deviceui::Page::Connectivity){line(8,6,"連線狀態",2);line(8,42,String("目前網路：")+currentWifiSsid());line(8,68,String("已保存 ")+String(unsigned(wifiProfiles.count))+" 組");line(8,94,String("遠端連線：")+(tail.state==ALARM_TAILNET_CONNECTED?"已連線":"未連線"));line(8,120,String("後端服務：")+(backendReachableNow(millis())?"可連線":"無法連線"));line(8,154,"連線異常不影響本機鬧鐘");}
-    else if(uiState.page==deviceui::Page::Schedule){line(8,6,"班表資訊",2);line(8,44,String("下次上班：")+(next==INT64_MAX?"尚無":dateWeek(next)));line(8,70,String("響鈴時間：")+(next==INT64_MAX?"--:--":alarmTime(next)));line(8,96,String("鬧鐘數量：")+String(unsigned(alarms.size())));line(8,122,String("儲存狀態：")+(revision.isEmpty()?"尚未儲存":localSchedule?"本機已儲存":"已同步"));line(8,148,String("版次：")+(revision.isEmpty()?"--":revision.substring(0,18)));}
+    else if(uiState.page==deviceui::Page::Schedule){line(8,6,"班表資訊",2);if(scheduleStorageFault.load()){line(8,48,"班表儲存狀態不明");line(8,76,"重開前請勿修改");line(8,108,"目前僅沿用本次開機班表");}else{line(8,44,String("下次上班：")+(next==INT64_MAX?"尚無":dateWeek(next)));line(8,70,String("響鈴時間：")+(next==INT64_MAX?"--:--":alarmTime(next)));line(8,96,String("鬧鐘數量：")+String(unsigned(alarms.size())));line(8,122,String("儲存狀態：")+(revision.isEmpty()?"尚未儲存":localSchedule?"本機已儲存":"已同步"));line(8,148,String("版次：")+(revision.isEmpty()?"--":revision.substring(0,18)));}}
     else if(uiState.page==deviceui::Page::Device){line(8,6,"裝置資訊",2);line(8,48,String("韌體版本：")+VERSION);line(8,78,String("IP：")+(WiFi.isConnected()?WiFi.localIP().toString():"未連線"));line(8,108,String("電池：")+(valid?String(percent)+"%":"未知"));line(8,134,String("充電：")+(chargingInputValid?(charging.load()?"是":"否"):"未知"));}
-    else if(uiState.page==deviceui::Page::Update){alarm_ota_status_t ota={};alarm_ota_get_status(&ota);line(8,6,"檢查更新",2);line(8,38,String("目前版本：")+VERSION);line(8,62,ota.marker_fault?"已下載狀態：異常":ota.staged_valid?String("已下載：")+ota.staged.manifest.version:"已下載：沒有");line(8,86,String("充電準備：")+(chargingInputValid&&charging.load()?"可以安裝":"尚未就緒"));if(WiFi.isConnected()){String url=String("http://")+WiFi.localIP().toString()+"/update";line(8,108,url);qr(url,8,138,1);line(78,146,"掃碼開啟更新頁");line(78,168,"實體鍵不會變更更新");}else line(8,120,"連上無線網路後顯示條碼");}
-    line(8,220,"左右切換 · 中鍵返回");
+    else if(uiState.page==deviceui::Page::Update){alarm_ota_status_t ota={};alarm_ota_get_status(&ota);line(8,deviceui::TITLE_Y,"檢查更新",2);if(WiFi.isConnected()){String url=String("http://")+WiFi.localIP().toString()+"/update";qr(url,deviceui::QR_X,deviceui::QR_Y,deviceui::QR_SCALE);const uint8_t detail=(millis()/2000)%4;if(detail==0)line(66,deviceui::BOTTOM_TEXT_Y,"掃碼開啟更新頁");else if(detail==1)line(66,deviceui::BOTTOM_TEXT_Y,String("目前：")+VERSION);else if(detail==2)line(ota.marker_fault?48:ota.staged_valid?66:72,deviceui::BOTTOM_TEXT_Y,ota.marker_fault?"已下載狀態異常":ota.staged_valid?String("已下載：")+ota.staged.manifest.version:"已下載：沒有");else line(60,deviceui::BOTTOM_TEXT_Y,String("充電：")+(chargingInputValid&&charging.load()?"可以安裝":"尚未就緒"));}else line(8,120,"連上無線網路後顯示條碼");}
+    const bool qrPage=WiFi.isConnected()&&(uiState.page==deviceui::Page::PhoneSetup||uiState.page==deviceui::Page::Update);
+    if(!qrPage)line(8,220,"左右切換 · 中鍵返回");
   }
   if(pairingHoldActive&&uiState.page!=deviceui::Page::Main){surface.fillRect(8,210,224,28,0x11c5);lineColor(34,217,String("配網倒數 ")+String(buttons::pairingSecondsRemaining(buttonState,millis()))+" 秒",1,0xaf7b);}
   uint16_t *pixels=frame->getBuffer(); uint32_t hash=2166136261u;
@@ -379,44 +407,54 @@ void startRing(String label) { ringLabel=label;ringStarted=millis();if(!ringing)
 void stopRing(bool doSnooze) { ringing=false;buttons::endRinging(buttonState);snooze=doSnooze&&clockValid()?time(nullptr)+alarmclock::SNOOZE_SECONDS:0;prefs.putLong64("snooze",snooze);forceDraw=true;Serial.println(doSnooze?"ALARM_SNOOZED":"ALARM_STOPPED"); }
 #include "calendar_metadata.h"
 JsonDocument calendarMonths;
-bool applySchedule(const String &body,bool persist,String &error) {
-  if(body.length()>MAX_JSON){error="班表資料過大";return false;}
-  JsonDocument doc; if(deserializeJson(doc,body)){error="資料格式無效";return false;}
-  if(!doc["revision"].is<String>()||doc["revision"].as<String>().isEmpty()||doc["timezone"]!="Asia/Taipei"||!doc["alarms"].is<JsonArray>()||doc["alarms"].size()>MAX_ALARMS){error="班表欄位不完整";return false;}
-  const JsonVariantConst firstOnlySetting=doc["first_consecutive_only"];
-  if(!firstOnlySetting.isNull()&&!firstOnlySetting.is<bool>()){error="連續上班通知設定無效";return false;}
-  bool nextFirstConsecutiveOnly=firstOnlySetting.is<bool>()?firstOnlySetting.as<bool>():false;
-  JsonDocument nextMonths;
-  if(doc.as<JsonObjectConst>().containsKey("months")){
-    if(!localcalendar::validMonths(doc["months"])) {error="月份設定格式無效或超過 120 個月";return false;}
-    nextMonths.set(doc["months"]);
-  }else nextMonths.to<JsonObject>();
-  if(nextMonths.overflowed()){error="月份設定記憶體不足";return false;}
-  std::vector<Alarm> next;
-  for(JsonObject a:doc["alarms"].as<JsonArray>()) {
-    if(!a["id"].is<String>()||a["id"].as<String>().isEmpty()||a["id"].as<String>().length()>128||!a["epoch"].is<int64_t>()||a["epoch"].as<int64_t>()<alarmclock::VALID_CLOCK||!a["label"].is<String>()||a["label"].as<String>().length()>256){error="鬧鐘資料無效";return false;}
-    for(auto &b:next)if(b.id==a["id"].as<String>()){error="鬧鐘識別碼重複";return false;}
-    next.push_back({a["id"].as<String>(),a["label"].as<String>(),a["epoch"].as<int64_t>()});
-  }
-  std::sort(next.begin(),next.end(),[](const Alarm&a,const Alarm&b){return a.epoch<b.epoch;});
-  JsonDocument saved;saved["revision"]=doc["revision"];saved["timezone"]=doc["timezone"];saved["alarms"]=doc["alarms"];saved["source"]=doc["source"]=="local"?"local":"remote";saved["months"]=nextMonths;saved["first_consecutive_only"]=nextFirstConsecutiveOnly;String canonical;serializeJson(saved,canonical);
-  if(saved.overflowed()||canonical.length()>MAX_JSON){error="班表資料過大";return false;}
-  if(persist&&savedSchedule()!=canonical&&prefs.putBytes("schedule",canonical.c_str(),canonical.length())!=canonical.length()){error="儲存失敗";return false;}
-  if(persist&&savedSchedule()!=canonical){error="儲存驗證失敗，請重試";return false;}
-  calendarMonths=std::move(nextMonths);
-  localSchedule=doc["source"]=="local";firstConsecutiveOnly=nextFirstConsecutiveOnly;alarms=std::move(next);revision=doc["revision"].as<String>();forceDraw=true;
-  // Authenticated LAN server also provides time if outbound NTP is unavailable.
-  if(persist && !clockValid() && doc["server_time"].is<int64_t>() && doc["server_time"].as<int64_t>()>=alarmclock::VALID_CLOCK) {
-    timeval tv={};tv.tv_sec=doc["server_time"].as<int64_t>();settimeofday(&tv,nullptr);
-  }
-  if(persist && doc["management_url"].is<String>()) {
-    String url=doc["management_url"].as<String>();if(url.length()<=180&&url.startsWith("http")&&url!=manageUrl){manageUrl=url;prefs.putString("manage",url);}
-  }
-  if(persist && doc["command"]["type"]=="stop") {
-    String id=doc["command"]["id"].as<String>();int64_t issued=doc["command"]["issued_at"]|int64_t(0);
-    if(id.length()&&id!=lastCommand&&clockValid()&&time(nullptr)-issued>=0&&time(nullptr)-issued<120){lastCommand=id;prefs.putString("command",id);stopRing(false);}
-  }
-  return true;
+void applyScheduleCandidate(schedulecandidate::Candidate &candidate,bool sideEffects=true){
+  alarms.swap(candidate.alarms);swap(calendarMonths,candidate.months);revision=std::move(candidate.revision);localSchedule=candidate.local;firstConsecutiveOnly=candidate.first_only;forceDraw=true;
+  ++scheduleGeneration;
+  backendpoll::invalidate(backendPollState);
+  if(!sideEffects)return;
+  if(!clockValid()&&candidate.server_time>=alarmclock::VALID_CLOCK){timeval tv={};tv.tv_sec=candidate.server_time;settimeofday(&tv,nullptr);}
+  if(candidate.management_url.startsWith("http")&&candidate.management_url!=manageUrl){manageUrl=candidate.management_url;prefs.putString("manage",manageUrl);}
+  if(candidate.stop_command&&candidate.command_id.length()&&candidate.command_id!=lastCommand&&clockValid()&&time(nullptr)-candidate.command_issued>=0&&time(nullptr)-candidate.command_issued<120){lastCommand=candidate.command_id;prefs.putString("command",lastCommand);stopRing(false);}
+}
+bool applySchedule(const String &body,bool persist,String &error){
+  if(persist){error="班表儲存必須由背景工作執行";return false;}schedulecandidate::Candidate candidate;if(!schedulecandidate::parse(body,candidate,error))return false;applyScheduleCandidate(candidate,false);return true;
+}
+bool scheduleNvsRead(String &out){
+  nvs_handle_t handle;if(nvs_open_from_partition("alarm_nvs","shift-alarm",NVS_READONLY,&handle)!=ESP_OK)return false;size_t size=0;esp_err_t err=nvs_get_blob(handle,"schedule",nullptr,&size);if(err==ESP_ERR_NVS_NOT_FOUND){nvs_close(handle);out="";return true;}if(err!=ESP_OK||size>MAX_JSON){nvs_close(handle);return false;}std::vector<char> bytes(size+1,0);err=nvs_get_blob(handle,"schedule",bytes.data(),&size);nvs_close(handle);if(err!=ESP_OK)return false;out=String(bytes.data());return out.length()==size;
+}
+bool scheduleNvsWriteExact(const String &value){
+  nvs_handle_t handle;if(nvs_open_from_partition("alarm_nvs","shift-alarm",NVS_READWRITE,&handle)!=ESP_OK)return false;esp_err_t err=value.isEmpty()?nvs_erase_key(handle,"schedule"):nvs_set_blob(handle,"schedule",value.c_str(),value.length());if(err==ESP_ERR_NVS_NOT_FOUND&&value.isEmpty())err=ESP_OK;if(err==ESP_OK)err=nvs_commit(handle);size_t size=0;if(err==ESP_OK)err=nvs_get_blob(handle,"schedule",nullptr,&size);bool ok=value.isEmpty()?err==ESP_ERR_NVS_NOT_FOUND:err==ESP_OK&&size==value.length();if(ok&&!value.isEmpty()){std::vector<char> check(size+1,0);ok=nvs_get_blob(handle,"schedule",check.data(),&size)==ESP_OK&&memcmp(check.data(),value.c_str(),size)==0;}nvs_close(handle);return ok;
+}
+bool scheduleFaultMarker(bool write){nvs_handle_t handle;if(nvs_open_from_partition("alarm_nvs","shift-alarm",write?NVS_READWRITE:NVS_READONLY,&handle)!=ESP_OK)return write?false:true;uint8_t value=0;esp_err_t err;if(write){err=nvs_set_u8(handle,"schedule-fault-v1",1);if(err==ESP_OK)err=nvs_commit(handle);if(err==ESP_OK)err=nvs_get_u8(handle,"schedule-fault-v1",&value);}else err=nvs_get_u8(handle,"schedule-fault-v1",&value);nvs_close(handle);return write?err==ESP_OK&&value==1:err==ESP_OK&&value==1;}
+void latchScheduleStorageFault(){scheduleStorageFault.store(true);scheduleFaultMarker(true);}
+bool buildLocalSchedule(const String &base,const String &patch,schedulecandidate::Candidate &candidate,String &error){
+  schedulecandidate::Candidate current;if(!base.isEmpty()&&!schedulecandidate::parse(base,current,error))return false;JsonDocument input;int year,month;if(deserializeJson(input,patch)){error="班表資料格式無效";return false;}auto first=input["first_consecutive_only"];
+  if(!input["month"].is<String>()||!localcalendar::month(input["month"].as<String>().c_str(),year,month)||!input["days"].is<JsonArray>()||!input["times"].is<JsonArray>()||(!input["disabled_times"].isNull()&&!input["disabled_times"].is<JsonArray>())||input["days"].size()>31||(input["days"].size()&&!input["times"].size())||input["times"].size()>8||input["disabled_times"].size()>8||(!first.isNull()&&!first.is<bool>())){error="請選擇有效月份、日期、鬧鐘時間及通知方式";return false;}
+  std::vector<int> days;std::vector<String> times;std::set<String> disabled;for(JsonVariant v:input["days"].as<JsonArray>()){if(!v.is<int>()||v.as<int>()<1||v.as<int>()>localcalendar::days(year,month)||std::find(days.begin(),days.end(),v.as<int>())!=days.end()){error="上班日期無效或重複";return false;}days.push_back(v.as<int>());}for(JsonVariant v:input["times"].as<JsonArray>()){int h,m;String at=v.as<String>();if(!v.is<String>()||!localcalendar::time(at.c_str(),h,m)||std::find(times.begin(),times.end(),at)!=times.end()){error="鬧鐘時間無效或重複，請使用 07:00 格式";return false;}times.push_back(at);}for(JsonVariant v:input["disabled_times"].as<JsonArray>()){String at=v.as<String>();if(!v.is<String>()||std::find(times.begin(),times.end(),at)==times.end()||!disabled.insert(at).second){error="停用的鬧鐘時間無效或重複";return false;}}
+  const bool firstOnly=first.is<bool>()?first.as<bool>():current.first_only;JsonDocument next;next["revision"]=String("local-")+String(esp_random(),HEX)+String(esp_random(),HEX);next["timezone"]="Asia/Taipei";next["source"]="local";next["first_consecutive_only"]=firstOnly;auto list=next["alarms"].to<JsonArray>();next["months"]=current.months;String monthKey=input["month"].as<String>();auto metadata=next["months"][monthKey].to<JsonObject>();metadata["days"]=input["days"];metadata["times"]=input["times"];auto disabledMeta=metadata["disabled_times"].to<JsonArray>();for(const auto &at:disabled)disabledMeta.add(at);if(!localcalendar::validMonths(next["months"])){error="月份設定格式無效或超過 120 個月";return false;}
+  std::set<int64_t> known;for(JsonPairConst entry:next["months"].as<JsonObjectConst>()){int y,m;localcalendar::month(entry.key().c_str(),y,m);for(JsonVariantConst day:entry.value()["days"].as<JsonArrayConst>())known.insert(localcalendar::epoch(y,m,day.as<int>(),0,0));}
+  for(const auto &alarm:current.alarms){time_t value=alarm.epoch;tm date;localtime_r(&value,&date);char text[32];snprintf(text,sizeof(text),"%04d-%02d",date.tm_year+1900,date.tm_mon+1);String key=text;bool currentMonth=date.tm_year+1900==year&&date.tm_mon+1==month,backed=next["months"][key].is<JsonObject>();if(alarm.id.startsWith("local-")&&!backed)known.insert(localcalendar::epoch(date.tm_year+1900,date.tm_mon+1,date.tm_mday,0,0));if(!alarm.id.startsWith("test-")&&(currentMonth||(alarm.id.startsWith("local-")&&backed)))continue;auto saved=list.add<JsonObject>();saved["id"]=alarm.id;saved["label"]=alarm.label;saved["epoch"]=alarm.epoch;}
+  for(JsonPairConst entry:next["months"].as<JsonObjectConst>()){int y,m;localcalendar::month(entry.key().c_str(),y,m);std::set<String> off;for(JsonVariantConst at:entry.value()["disabled_times"].as<JsonArrayConst>())off.insert(at.as<String>());for(JsonVariantConst day:entry.value()["days"].as<JsonArrayConst>()){int selected=day.as<int>();int64_t work=localcalendar::epoch(y,m,selected,0,0);if(!localcalendar::shouldNotify(work,known,firstOnly))continue;for(JsonVariantConst av:entry.value()["times"].as<JsonArrayConst>()){String at=av.as<String>();if(off.count(at))continue;if(list.size()>=MAX_ALARMS){error="已超過裝置可儲存的 512 個鬧鐘，請先清除不需要的月份";return false;}int h,min;localcalendar::time(at.c_str(),h,min);auto alarm=list.add<JsonObject>();alarm["id"]=String("local-")+entry.key().c_str()+"-"+selected+"-"+at;alarm["label"]="上班鬧鐘";alarm["epoch"]=localcalendar::epoch(y,m,selected,h,min);}}}
+  if(next.overflowed()){error="班表設定記憶體不足，原設定未變更";return false;}String full;serializeJson(next,full);return schedulecandidate::parse(full,candidate,error);
+}
+void wipeScheduleWork(ScheduleWork *work){if(!work)return;wipeString(work->input);wipeString(work->previous);for(auto &alarm:work->candidate.alarms){wipeString(alarm.id);wipeString(alarm.label);}work->candidate.alarms.clear();work->candidate.months.clear();wipeString(work->candidate.revision);wipeString(work->candidate.canonical);wipeString(work->candidate.management_url);wipeString(work->candidate.command_id);delete work;}
+void scheduleWorker(void*){for(;;){ScheduleWork *work=nullptr;if(xQueueReceive(scheduleRequestQueue,&work,portMAX_DELAY)!=pdTRUE||!work)continue;if(work->origin==ScheduleOrigin::Cleanup){wipeScheduleWork(work);continue;}if(work->origin==ScheduleOrigin::Rollback){work->persisted=scheduleNvsWriteExact(work->previous);if(!work->persisted)latchScheduleStorageFault();}else if(!scheduleNvsRead(work->previous))work->error="無法讀取既有班表";else if(work->origin==ScheduleOrigin::Local?!buildLocalSchedule(work->previous,work->input,work->candidate,work->error):!schedulecandidate::parse(work->input,work->candidate,work->error)){}else{work->persisted=scheduleNvsWriteExact(work->candidate.canonical);if(!work->persisted&&!scheduleNvsWriteExact(work->previous)){work->error="班表儲存狀態不明；重開前請勿修改";latchScheduleStorageFault();}}if(!work->persisted&&work->error.isEmpty())work->error="班表儲存失敗；未變更執行中班表";wipeString(work->input);if(xQueueSend(scheduleResultQueue,&work,0)!=pdTRUE){if(work->persisted&&work->origin!=ScheduleOrigin::Rollback&&!scheduleNvsWriteExact(work->previous))latchScheduleStorageFault();scheduleDroppedId.store(work->id);wipeScheduleWork(work);}}}
+bool initScheduleWorker(){scheduleRequestQueue=xQueueCreate(1,sizeof(ScheduleWork*));scheduleResultQueue=xQueueCreate(1,sizeof(ScheduleWork*));if(!scheduleRequestQueue||!scheduleResultQueue){if(scheduleRequestQueue)vQueueDelete(scheduleRequestQueue);if(scheduleResultQueue)vQueueDelete(scheduleResultQueue);scheduleRequestQueue=nullptr;scheduleResultQueue=nullptr;return false;}if(xTaskCreate(scheduleWorker,"schedule_store",12288,nullptr,1,nullptr)!=pdPASS){vQueueDelete(scheduleRequestQueue);vQueueDelete(scheduleResultQueue);scheduleRequestQueue=nullptr;scheduleResultQueue=nullptr;return false;}return true;}
+bool enqueueScheduleWork(ScheduleOrigin origin,String &&input,uint32_t &id){if(scheduleStorageFault.load()||!scheduleWorkReady||scheduleWorkBusy)return false;auto *work=new(std::nothrow)ScheduleWork;if(!work)return false;work->id=++scheduleWorkId;work->schedule_generation=scheduleGeneration;work->backend_generation=backendPollState.validity_generation;work->origin=origin;work->input=std::move(input);if(xQueueSend(scheduleRequestQueue,&work,0)!=pdTRUE){wipeScheduleWork(work);return false;}scheduleWorkBusy=true;id=work->id;return true;}
+void drainScheduleResult(){
+ const uint32_t dropped=scheduleDroppedId.exchange(0);
+ if(dropped){scheduleWorkBusy=false;syncState=scheduleStorageFault.load()?"班表儲存狀態不明；重開前請勿修改":"班表結果傳遞失敗；未變更執行中班表";if(dropped==localSaveId){localSaveState="error";localSaveMessage=syncState;}}
+ if(scheduleStorageFault.load()&&!scheduleStorageFaultObserved){scheduleStorageFaultObserved=true;++scheduleGeneration;backendpoll::invalidate(backendPollState);scheduleWorkBusy=false;localSaveState="error";localSaveMessage="班表儲存狀態不明；重開前請勿修改";}
+ if(!scheduleResultQueue)return;
+ ScheduleWork *work=nullptr;
+ while(xQueueReceive(scheduleResultQueue,&work,0)==pdTRUE){
+  scheduleWorkBusy=false;
+  if(work->origin==ScheduleOrigin::Rollback){if(!work->persisted){latchScheduleStorageFault();syncState="班表儲存狀態不明；重開前請勿修改";}work->origin=ScheduleOrigin::Cleanup;if(xQueueSend(scheduleRequestQueue,&work,0)!=pdTRUE)wipeScheduleWork(work);continue;}
+  const bool current=!scheduleStorageFault.load()&&work->schedule_generation==scheduleGeneration&&(work->origin!=ScheduleOrigin::Backend||work->backend_generation==backendPollState.validity_generation);
+  if(work->persisted&&current){const bool local=work->origin==ScheduleOrigin::Local;applyScheduleCandidate(work->candidate);syncState=local?"班表已儲存":"班表已同步";if(local){localSaveState="saved";localSaveMessage="已儲存";}work->origin=ScheduleOrigin::Cleanup;if(xQueueSend(scheduleRequestQueue,&work,0)!=pdTRUE)wipeScheduleWork(work);}
+  else if(work->persisted){if(work->origin==ScheduleOrigin::Local){localSaveState="error";localSaveMessage="班表已被較新的設定取代";}work->origin=ScheduleOrigin::Rollback;work->persisted=false;work->error="";scheduleWorkBusy=xQueueSend(scheduleRequestQueue,&work,0)==pdTRUE;if(!scheduleWorkBusy){latchScheduleStorageFault();syncState="班表儲存狀態不明；重開前請勿修改";wipeScheduleWork(work);}}
+  else{syncState=scheduleStorageFault.load()?"班表儲存狀態不明；重開前請勿修改":work->error;if(work->origin==ScheduleOrigin::Local){localSaveState="error";localSaveMessage=syncState;}work->origin=ScheduleOrigin::Cleanup;if(xQueueSend(scheduleRequestQueue,&work,0)!=pdTRUE)wipeScheduleWork(work);}
+ }
 }
 bool authorized() { if(token.length()&&server.header("Authorization")==String("Bearer ")+token)return true; server.send(401,"application/json","{\"error\":\"需要裝置授權\"}");return false; }
 void startPortal() { wakeScreen();if(portal)return;portal=true; WiFi.mode(WIFI_AP_STA); WiFi.softAP(apName.c_str(),apPassword.c_str());dns.start(53,"*",WiFi.softAPIP());Serial.println("SETUP_AP_STARTED");Serial.println(String("SETUP_AP_SSID ")+apName);Serial.println("SETUP_URL http://192.168.4.1"); }
@@ -459,7 +497,7 @@ void serviceWifi(uint32_t now){
       wifiprofiles::List next=wifiProfiles;
       const auto result=wifiprofiles::addOrUpdate(next,{pendingSsid.c_str(),pendingSsid.size(),pendingPassword.c_str(),pendingPassword.size()});wifiprofiles::Selector committed;
       const auto stored=result==wifiprofiles::Result::Ok?persistWifiProfiles(next,committed):wifiprofiles::CommitResult::Failed;
-      if(stored==wifiprofiles::CommitResult::Committed||stored==wifiprofiles::CommitResult::CommittedStorageFault){wifiProfiles=next;wifiSelector=committed;wifiSelectorValid=true;setupFailed=false;clearPendingWifi();apCloseAt=now+20000;lastPoll=now-POLL_MS;}
+      if(stored==wifiprofiles::CommitResult::Committed||stored==wifiprofiles::CommitResult::CommittedStorageFault){wifiProfiles=next;wifiSelector=committed;wifiSelectorValid=true;setupFailed=false;clearPendingWifi();apCloseAt=now+20000;backendPollState.next_attempt_ms=now;}
       else{setupFailed=true;clearPendingWifi();WiFi.disconnect(false,false);wififailover::candidateFailed(wifiState,now);}
     }else if(wifiPendingTrial){WiFi.disconnect(false,false);}
     else wififailover::healthy(wifiState);
@@ -521,8 +559,10 @@ bool readChargingNow(bool &active){if(!chargingInputValid)return false;const int
 esp_err_t otaReadGuard(alarm_ota_guard_t *out,void*){portENTER_CRITICAL(&otaMux);*out=otaGuard;portEXIT_CRITICAL(&otaMux);out->charging_valid=readChargingNow(out->charging);out->ringing=ringing;out->now_epoch=time(nullptr);return ESP_OK;}
 void refreshOtaGuard(){alarm_ota_guard_t g={};g.clock_valid=clockValid();g.ringing=ringing;g.snoozed=snooze>0;g.schedule_ready=!revision.isEmpty();g.now_epoch=time(nullptr);int64_t next=snooze>0?snooze:INT64_MAX;for(auto &a:alarms)if(alarmclock::upcoming(a.epoch,g.now_epoch,handled)&&a.epoch<next)next=a.epoch;g.next_alarm_epoch=next==INT64_MAX?0:next;portENTER_CRITICAL(&otaMux);otaGuard=g;portEXIT_CRITICAL(&otaMux);}
 bool backendReachableNow(uint32_t nowMs){
+  alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);
   return connectivity::backend_reachable(
-    WiFi.isConnected(),backendLastResult.load(),backendHasSuccess.load(),
+    WiFi.isConnected(),tail.state==ALARM_TAILNET_CONNECTED,
+    backendLastResult.load(),backendHasSuccess.load(),
     nowMs,backendLastSuccessMs.load());
 }
 const char *otaLocalReason(){
@@ -557,6 +597,7 @@ const char *otaLocalReason(){
 }
 const char *otaDownloadReason(){
   const char *local=otaLocalReason();if(strcmp(local,"ready"))return local;
+  if(backendpoll::blocksOta(backendPollState))return "backend-poll-busy";
   alarm_ota_status_t status={};if(alarm_ota_get_status(&status)==ESP_OK&&status.staged_valid)return "staged-update-exists";
   if(!WiFi.isConnected())return "wifi-not-ready";
   alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);
@@ -564,7 +605,7 @@ const char *otaDownloadReason(){
   if(!backendReachableNow(millis()))return "backend-not-reachable";
   return "ready";
 }
-const char *otaInstallReason(){if(!otaReady)return "ota-not-ready";if(otaBusy.load())return "busy";alarm_ota_status_t status={};if(alarm_ota_get_status(&status)!=ESP_OK||status.marker_fault)return "marker-fault";if(!status.staged_valid)return "no-staged-update";return otaLocalReason();}
+const char *otaInstallReason(){if(!otaReady)return "ota-not-ready";if(otaBusy.load())return "busy";if(backendpoll::blocksOta(backendPollState))return "backend-poll-busy";alarm_ota_status_t status={};if(alarm_ota_get_status(&status)!=ESP_OK||status.marker_fault)return "marker-fault";if(!status.staged_valid)return "no-staged-update";return otaLocalReason();}
 constexpr char OTA_MARKER_KEY[]="ota-stage-v1";
 esp_err_t otaMarkerLoad(alarm_ota_staged_record_t *out,void*){nvs_handle_t handle;esp_err_t err=nvs_open_from_partition("alarm_nvs","shift-alarm",NVS_READONLY,&handle);if(err!=ESP_OK)return err;size_t size=sizeof(*out);err=nvs_get_blob(handle,OTA_MARKER_KEY,out,&size);nvs_close(handle);if(err==ESP_ERR_NVS_NOT_FOUND)return ESP_ERR_NOT_FOUND;if(err!=ESP_OK)return err;return size==sizeof(*out)?ESP_OK:ESP_ERR_INVALID_SIZE;}
 esp_err_t otaMarkerStore(const alarm_ota_staged_record_t *record,void*){nvs_handle_t handle;esp_err_t err=nvs_open_from_partition("alarm_nvs","shift-alarm",NVS_READWRITE,&handle);if(err!=ESP_OK)return err;err=nvs_set_blob(handle,OTA_MARKER_KEY,record,sizeof(*record));if(err==ESP_OK)err=nvs_commit(handle);nvs_close(handle);return err;}
@@ -595,6 +636,87 @@ bool boundedHttpBody(HTTPClient &h,size_t maximum,String &out,uint32_t timeoutMs
     received+=size_t(n);
   }
   return out.length()==size_t(length);
+}
+void secureWipeBackendExchange(BackendPollExchange *exchange){
+  if(!exchange)return;
+  volatile char *wipe=exchange->token;for(size_t i=0;i<sizeof(exchange->token);i++)wipe[i]=0;
+  wipe=exchange->backend;for(size_t i=0;i<sizeof(exchange->backend);i++)wipe[i]=0;
+  wipe=exchange->revision;for(size_t i=0;i<sizeof(exchange->revision);i++)wipe[i]=0;
+  wipe=exchange->heartbeat;for(size_t i=0;i<sizeof(exchange->heartbeat);i++)wipe[i]=0;
+  volatile char *body=const_cast<char*>(exchange->schedule_body.c_str());for(unsigned i=0;i<exchange->schedule_body.length();i++)body[i]=0;
+  exchange->schedule_body="";delete exchange;
+}
+void backendPollWorker(void*){
+  for(;;){
+    BackendPollExchange *request=nullptr;
+    if(xQueueReceive(backendRequestQueue,&request,portMAX_DELAY)!=pdTRUE||!request)continue;
+    if(request->fetch_schedule){
+      HTTPClient schedule;schedule.setConnectTimeout(1500);schedule.setTimeout(2000);
+      const String url=String(request->backend)+"/api/device/schedule";
+      if(schedule.begin(url)){
+        String authorization=String("Bearer ")+request->token;schedule.addHeader("Authorization",authorization);wipeString(authorization);
+        request->schedule_status=schedule.GET();
+        if(request->schedule_status==200)request->schedule_body_valid=boundedHttpBody(schedule,MAX_JSON,request->schedule_body,8000);
+      }
+      schedule.end();
+    }
+    HTTPClient heartbeat;heartbeat.setConnectTimeout(1500);heartbeat.setTimeout(2000);
+    const String url=String(request->backend)+"/api/device/heartbeat";
+    if(heartbeat.begin(url)){
+      String authorization=String("Bearer ")+request->token;heartbeat.addHeader("Authorization",authorization);wipeString(authorization);
+      heartbeat.addHeader("Content-Type","application/json");
+      request->heartbeat_ok=heartbeat.POST(reinterpret_cast<uint8_t*>(request->heartbeat),strlen(request->heartbeat))==200;
+    }
+    heartbeat.end();
+    if(xQueueSend(backendResultQueue,&request,0)!=pdTRUE){backendDroppedGeneration.store(request->ticket.request_generation);secureWipeBackendExchange(request);}
+  }
+}
+bool initBackendPoll(){
+  backendRequestQueue=xQueueCreate(1,sizeof(BackendPollExchange*));backendResultQueue=xQueueCreate(1,sizeof(BackendPollExchange*));
+  if(!backendRequestQueue||!backendResultQueue){if(backendRequestQueue)vQueueDelete(backendRequestQueue);if(backendResultQueue)vQueueDelete(backendResultQueue);backendRequestQueue=nullptr;backendResultQueue=nullptr;return false;}
+  // Low priority and no core pinning keep Tailnet/proxy tasks schedulable; 8 KiB covers bounded HTTP/JSON locals.
+  if(xTaskCreate(backendPollWorker,"backend_poll",8192,nullptr,1,nullptr)!=pdPASS){vQueueDelete(backendRequestQueue);vQueueDelete(backendResultQueue);backendRequestQueue=nullptr;backendResultQueue=nullptr;return false;}
+  return true;
+}
+void observeBackendPollAvailability(){
+  alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);
+  const bool ready=WiFi.isConnected()&&tail.state==ALARM_TAILNET_CONNECTED;
+  const uint32_t previous=backendPollState.validity_generation;backendpoll::observeConnectivity(backendPollState,ready,ready?uint32_t(WiFi.localIP()):0);
+  const bool busy=otaBusy.load();if(busy&&!backendPollObservedOtaBusy)backendpoll::invalidate(backendPollState);backendPollObservedOtaBusy=busy;
+  if(previous!=backendPollState.validity_generation)backendLastResult.store(false);
+}
+void startBackendPoll(uint32_t nowMs){
+  if(!backendPollReady)return;
+  alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);
+  const bool transportReady=connectivity::should_poll_backend(WiFi.isConnected(),tail.state==ALARM_TAILNET_CONNECTED,!backend.isEmpty(),!token.isEmpty());
+  if(!backendpoll::canStart(backendPollState,nowMs,transportReady,otaBusy.load()))return;
+  const auto ticket=backendpoll::begin(backendPollState,nowMs,POLL_MS);
+  auto *request=new(std::nothrow) BackendPollExchange;
+  if(!request){backendpoll::allocationFailed(backendPollState,nowMs);syncState="後端服務無法使用";return;}
+  request->ticket=ticket;request->fetch_schedule=!localSchedule;
+  JsonDocument d;d["revision"]=revision;d["status"]=ringing?"ringing":(clockValid()?"ready":"waiting_for_time");d["ip"]=WiFi.localIP().toString();
+  int64_t next=INT64_MAX;for(auto &a:alarms)if(alarmclock::upcoming(a.epoch,time(nullptr),handled)&&a.epoch<next)next=a.epoch;if(next!=INT64_MAX)d["next_alarm"]=next;
+  int percent=0;uint32_t age=0;JsonObject battery=d["battery"].to<JsonObject>();battery["schema"]=1;battery["valid"]=battery::value(batteryState,millis(),percent,age);if(battery["valid"].as<bool>()){battery["percent"]=percent;battery["sample_age_seconds"]=age;}else{battery["percent"]=nullptr;battery["sample_age_seconds"]=nullptr;}if(chargingInputValid)battery["charging"]=charging.load();else battery["charging"]=nullptr;
+  const size_t heartbeatSize=measureJson(d);
+  if(backend.length()>=sizeof(request->backend)||token.length()>=sizeof(request->token)||revision.length()>=sizeof(request->revision)||heartbeatSize>=sizeof(request->heartbeat)){
+    secureWipeBackendExchange(request);backendpoll::allocationFailed(backendPollState,nowMs);syncState="後端資料超過限制";return;
+  }
+  strlcpy(request->backend,backend.c_str(),sizeof(request->backend));strlcpy(request->token,token.c_str(),sizeof(request->token));strlcpy(request->revision,revision.c_str(),sizeof(request->revision));if(serializeJson(d,request->heartbeat,sizeof(request->heartbeat))!=heartbeatSize){secureWipeBackendExchange(request);backendpoll::allocationFailed(backendPollState,nowMs);syncState="後端資料序列化失敗";return;}
+  if(xQueueSend(backendRequestQueue,&request,0)!=pdTRUE){secureWipeBackendExchange(request);backendpoll::allocationFailed(backendPollState,nowMs);syncState="後端服務忙碌，稍後重試";}else backendpoll::enqueued(backendPollState);
+}
+void drainBackendPollResult(){
+  const uint32_t dropped=backendDroppedGeneration.exchange(0);if(dropped)backendpoll::finishGeneration(backendPollState,dropped);
+  if(!backendResultQueue)return;
+  BackendPollExchange *result=nullptr;
+  while(xQueueReceive(backendResultQueue,&result,0)==pdTRUE){
+    const bool accepted=backendpoll::accepts(backendPollState,result->ticket,otaBusy.load());
+    backendpoll::finish(backendPollState,result->ticket);
+    if(accepted){
+      if(result->fetch_schedule&&!localSchedule&&revision==result->revision){if(result->schedule_status!=200)syncState=String("同步失敗，回應碼 ")+result->schedule_status;else if(!result->schedule_body_valid)syncState="班表大小無效或傳輸不完整";else if(scheduleStorageFault.load())syncState="班表儲存狀態不明；重開前請勿修改";else{uint32_t id=0;if(enqueueScheduleWork(ScheduleOrigin::Backend,std::move(result->schedule_body),id))syncState="班表驗證與儲存中";else syncState="班表背景工作忙碌";}}
+      backendLastResult.store(result->heartbeat_ok);if(result->heartbeat_ok){backendLastSuccessMs.store(millis());backendHasSuccess.store(true);}
+    }
+    secureWipeBackendExchange(result);result=nullptr;
+  }
 }
 void otaWorker(void*){
  {
@@ -658,6 +780,7 @@ void otaStagedRoutes() {
   server.on("/update", HTTP_GET, [] {
     String page=R"HTML(<h1>裝置更新</h1><p>下載與安裝是兩個分開的步驟。完整下載並驗證後，更新會保存在備用分區；下載完成不會重新啟動。</p><div class="upload-box"><strong>供電限制</strong><p>下載與安裝時，裝置都必須由 GPIO38 顯示「充電中」。這是充電狀態，不是可靠的 USB／VBUS 偵測。電池完整充電時即使接著 USB，也可能因未顯示充電而拒絕下載或安裝。</p><p>下載中斷後，同一次開機可安全續傳；若重新開機，部分檔案不會保存，重新開機後會從 0 重新下載。完整且已驗證的更新可在沒有 Wi-Fi、Tailscale 或後端時稍後安裝。</p></div><p>目前版本：<strong id="current-version">讀取中</strong></p><p>最新版本：<strong id="latest-version">尚未檢查</strong></p><p>已下載版本：<strong id="staged-version">沒有</strong></p><p id="status" role="status">正在取得狀態…</p><progress id="progress" max="100" value="0" style="width:100%"></progress><div class="button-row"><button id="download-update" disabled>下載更新</button><button id="install-update" disabled>安裝並重新啟動</button><button id="discard-update" class="secondary" disabled>刪除已下載更新</button></div><p class="help">按鈕只會各送出一次請求；回應不明時先讀取狀態，不會自動重送。</p><a href="/display">返回裝置設定</a><style>.button-row{display:flex;gap:10px;flex-wrap:wrap}.button-row button{flex:1 1 190px}progress{height:18px}@media(max-width:600px){.button-row{display:grid}.button-row button{width:100%}}</style><script>
 const nonce='NONCE',statusEl=document.querySelector('#status'),downloadButton=document.querySelector('#download-update'),installButton=document.querySelector('#install-update'),discardButton=document.querySelector('#discard-update');let currentSession=null,newest=0,nextRequest=0,acceptedRequest=0,mutationPending=false;/* OTA_STATUS_POLICY_START */function recordUpdateFailure(requestId){if(requestId>acceptedRequest)acceptedRequest=requestId}function acceptUpdateStatus(d,requestId){if(requestId<acceptedRequest)return false;if(currentSession===null||d.session!==currentSession){currentSession=d.session;newest=d.sequence;acceptedRequest=requestId;return true}if(d.sequence<newest)return false;newest=d.sequence;acceptedRequest=requestId;return true}/* OTA_STATUS_POLICY_END */const reasons={ready:'可以操作',busy:'更新操作進行中','marker-fault':'更新記錄狀態不明；下載與安裝已封鎖，可嘗試刪除後重新讀取','charging-required':'裝置目前未顯示充電','ota-not-ready':'更新功能尚未就緒','wifi-not-ready':'無線網路尚未連線','tailnet-not-ready':'Tailscale 尚未就緒','backend-not-reachable':'更新後端目前無法連線','clock-not-ready':'裝置尚未校時','alarm-active':'鬧鐘正在響鈴',snoozed:'貪睡提醒尚未結束','schedule-not-ready':'排程尚未就緒','alarm-near':'五分鐘內有鬧鐘','no-staged-update':'沒有已下載更新','staged-update-exists':'請先安裝或刪除已下載更新'};async function refresh(){const requestId=++nextRequest;try{const r=await fetch('/api/update',{headers:{'X-Setup-Nonce':nonce},cache:'no-store'});const d=await r.json();if(!acceptUpdateStatus(d,requestId))return;document.querySelector('#current-version').textContent=d.currentVersion;document.querySelector('#latest-version').textContent=d.latestVersion||'尚未檢查';document.querySelector('#staged-version').textContent=d.staged?d.staged.version:'沒有';downloadButton.disabled=mutationPending||d.busy||!d.canDownload;installButton.disabled=mutationPending||d.busy||!d.canInstall;discardButton.disabled=mutationPending||d.busy||(!d.staged&&!d.markerFault);const percent=d.total?Math.floor(d.received*100/d.total):0;document.querySelector('#progress').value=percent;statusEl.textContent=d.message+'；下載：'+(reasons[d.downloadReason]||d.downloadReason)+'；安裝：'+(reasons[d.installReason]||d.installReason)+(d.total?'（'+d.received+' / '+d.total+' 位元組，'+percent+'%）':'');}catch(e){recordUpdateFailure(requestId);statusEl.textContent='裝置連線中斷；保留上次顯示，稍後只重新讀取狀態。'}}async function mutate(path){if(mutationPending)return;mutationPending=true;downloadButton.disabled=installButton.disabled=discardButton.disabled=true;try{const r=await fetch(path,{method:'POST',headers:{'X-Setup-Nonce':nonce}});statusEl.textContent=await r.text();}catch(e){statusEl.textContent='請求結果不明；不會自動重送，請等待唯讀狀態更新。'}finally{mutationPending=false;setTimeout(refresh,500)}}downloadButton.onclick=()=>mutate('/api/update/download');installButton.onclick=()=>mutate('/api/update/install');discardButton.onclick=()=>mutate('/api/update/discard');refresh();setInterval(refresh,2000);
+reasons['backend-poll-busy']='後端同步即將完成，請稍候再試';
 </script>)HTML";
     page.replace("NONCE", setupNonce);
     server.send(200, "text/html; charset=utf-8", devicePage(page));
@@ -753,9 +876,10 @@ void routes() {
   });
   server.on("/wifi/reset",HTTP_POST,[]{
     if(server.arg("nonce")!=setupNonce){server.send(403,"text/plain; charset=utf-8","請重新開啟設定頁");return;}
-    apCloseAt=0;showJoinQr=true;startPortal();server.send(200,"text/html; charset=utf-8",devicePage("<h1>配網已啟動</h1><p>請掃描裝置螢幕條碼，加入熱點後重新設定無線網路。</p><a href='/'>開啟配網頁</a>"));
+    apCloseAt=0;portalView=0;startPortal();server.send(200,"text/html; charset=utf-8",devicePage("<h1>配網已啟動</h1><p>請掃描裝置螢幕條碼，加入熱點後重新設定無線網路。</p><a href='/'>開啟配網頁</a>"));
   });
-  server.on("/api/schedule",HTTP_POST,[]{if(!authorized())return;if(localSchedule){server.send(409,"text/plain; charset=utf-8","目前使用班表，請從班表頁修改");return;}String err;if(!applySchedule(server.arg("plain"),true,err)){server.send(400,"application/json",String("{\"error\":\"")+err+"\"}");return;}server.send(200,"application/json","{\"ok\":true}");});
+  server.on("/api/schedule",HTTP_POST,[]{if(!authorized())return;if(scheduleStorageFault.load()){server.send(409,"application/json","{\"error\":\"schedule-storage-fault\",\"detail\":\"班表儲存狀態不明；重開前請勿修改\"}");return;}if(localSchedule){server.send(409,"text/plain; charset=utf-8","目前使用班表，請從班表頁修改");return;}String input=server.arg("plain");uint32_t id=0;if(input.length()>MAX_JSON){server.send(413,"text/plain; charset=utf-8","班表資料過大");return;}if(!enqueueScheduleWork(ScheduleOrigin::Direct,std::move(input),id)){server.send(409,"text/plain; charset=utf-8","班表背景工作忙碌");return;}server.send(202,"application/json",String("{\"pending\":true,\"id\":")+id+"}");});
+  server.on("/api/schedule-storage-status",HTTP_GET,[]{if(!authorized())return;server.send(200,"application/json",scheduleStorageFault.load()?"{\"fault\":true,\"reason\":\"schedule-storage-fault\",\"message\":\"班表儲存狀態不明；重開前請勿修改\"}":"{\"fault\":false,\"reason\":\"ready\"}");});
   server.on("/api/test",HTTP_POST,[]{if(!authorized())return;startRing("喇叭測試");server.send(200,"application/json","{\"ok\":true}");});
   server.on("/api/stop",HTTP_POST,[]{if(!authorized())return;stopRing(false);server.send(200,"application/json","{\"ok\":true}");});
   server.on("/api/wifi",HTTP_GET,[]{
@@ -804,20 +928,6 @@ void routes() {
   });
   server.onNotFound([]{if(portal){server.sendHeader("Location","http://192.168.4.1/");server.send(302,"text/plain","");}else server.send(404,"text/plain; charset=utf-8","找不到此頁面");}); server.begin();deviceRoutesReady=true;
 }
-void pollBackend() {
-  if(!WiFi.isConnected()||backend.isEmpty()||token.isEmpty())return;
-  HTTPClient h;h.setConnectTimeout(1500);h.setTimeout(2000);
-  if(localSchedule)syncState="班表已儲存";
-  else {
-    h.begin(backend+"/api/device/schedule");h.addHeader("Authorization",String("Bearer ")+token);
-    int code=h.GET(); if(code==200){String err,body;if(!boundedHttpBody(h,MAX_JSON,body,8000))syncState="班表大小無效或傳輸不完整";else if(applySchedule(body,true,err))syncState="班表已同步";else syncState=err;}else syncState=String("同步失敗，回應碼 ")+code;h.end();
-  }
-  JsonDocument d;d["revision"]=revision;d["status"]=ringing?"ringing":(clockValid()?"ready":"waiting_for_time");d["ip"]=WiFi.localIP().toString();
-  int64_t next=INT64_MAX;for(auto &a:alarms)if(alarmclock::upcoming(a.epoch,time(nullptr),handled)&&a.epoch<next)next=a.epoch;
-  if(next!=INT64_MAX)d["next_alarm"]=next;
-  int percent=0;uint32_t age=0;JsonObject battery=d["battery"].to<JsonObject>();battery["schema"]=1;battery["valid"]=battery::value(batteryState,millis(),percent,age);if(battery["valid"].as<bool>()){battery["percent"]=percent;battery["sample_age_seconds"]=age;}else{battery["percent"]=nullptr;battery["sample_age_seconds"]=nullptr;}if(chargingInputValid)battery["charging"]=charging.load();else battery["charging"]=nullptr;
-  String body;serializeJson(d,body);h.begin(backend+"/api/device/heartbeat");h.addHeader("Authorization",String("Bearer ")+token);h.addHeader("Content-Type","application/json");const int heartbeatStatus=h.POST(body);backendLastResult.store(heartbeatStatus==200);if(heartbeatStatus==200){backendLastSuccessMs.store(millis());backendHasSuccess.store(true);}h.end();
-}
 void setup() {
   rtc_gpio_hold_dis(GPIO_NUM_21);rtc_gpio_init(GPIO_NUM_21);rtc_gpio_set_direction(GPIO_NUM_21,RTC_GPIO_MODE_OUTPUT_ONLY);rtc_gpio_set_level(GPIO_NUM_21,1); // Match the verified upstream board power control.
   Serial.begin(115200);ESP_ERROR_CHECK(nvs_flash_init());if(psramFound())heap_caps_malloc_extmem_enable(4096); esp_err_t nvs=nvs_flash_init_partition("alarm_nvs");ESP_ERROR_CHECK(nvs);if(!prefs.begin("shift-alarm",false,"alarm_nvs")){Serial.println("SETTINGS_STORAGE_FAILED");abort();}
@@ -835,7 +945,7 @@ void setup() {
   backend=prefs.getString("backend");if(backend=="http://192.168.18.31:8237"){backend="http://100.126.226.79:8237";prefs.putString("backend",backend);}token=prefs.getString("token");manageUrl=prefs.getString("manage");
   apPassword=prefs.getString("ap-pass");if(apPassword.isEmpty()){char b[13];snprintf(b,sizeof(b),"%08lx%04lx",(unsigned long)esp_random(),(unsigned long)(esp_random()&0xffff));apPassword=b;prefs.putString("ap-pass",apPassword);}
   uint8_t staMac[6]={};ESP_ERROR_CHECK(esp_read_mac(staMac,ESP_MAC_WIFI_STA));char apSuffix[5];deviceidentity::suffix(staMac,apSuffix);apName=String("ShiftAlarm-")+apSuffix;
-  String err;String stored=savedSchedule();savedScheduleRestored=!prefs.isKey("schedule")||(!stored.isEmpty()&&applySchedule(stored,false,err));
+  scheduleStorageFault.store(scheduleFaultMarker(false));String err;String stored=savedSchedule();savedScheduleRestored=!scheduleStorageFault.load()&&(!prefs.isKey("schedule")||(!stored.isEmpty()&&applySchedule(stored,false,err)));if(scheduleStorageFault.load())syncState="班表儲存狀態不明；重開前請勿修改";
   pinMode(BUTTON_STOP,INPUT_PULLUP);pinMode(BUTTON_SNOOZE,INPUT_PULLUP);pinMode(BUTTON_TEST,INPUT_PULLUP);
 #if CUBE_TFT
   frame=new GFXcanvas16(240,240);assert(frame && frame->getBuffer());
@@ -848,9 +958,9 @@ void setup() {
   i2s_pin_config_t pins={};pins.mck_io_num=I2S_PIN_NO_CHANGE;pins.bck_io_num=15;pins.ws_io_num=16;pins.data_out_num=7;pins.data_in_num=I2S_PIN_NO_CHANGE;
   ESP_ERROR_CHECK(i2s_driver_install(I2S_NUM_0,&cfg,0,nullptr));ESP_ERROR_CHECK(i2s_set_pin(I2S_NUM_0,&pins));if(xTaskCreatePinnedToCore(soundTask,"speaker",3072,nullptr,2,nullptr,0)!=pdPASS)abort();
   alarm_ota_config_t otaConfig={};otaConfig.board_id="xingzhi-cube-1.54tft-wifi";otaConfig.device_token=(const uint8_t*)token.c_str();otaConfig.device_token_length=token.length();otaConfig.quiet_window_seconds=300;otaConfig.transfer_timeout_seconds=600;otaConfig.authorize=otaAuthorize;otaConfig.read_guard=otaReadGuard;otaConfig.marker_load=otaMarkerLoad;otaConfig.marker_store=otaMarkerStore;otaConfig.marker_clear=otaMarkerClear;
-  ESP_ERROR_CHECK(alarm_proxy_init("100.126.226.79",8237));
+  ESP_ERROR_CHECK(alarm_proxy_init("100.126.226.79",8237));scheduleWorkReady=initScheduleWorker();if(!scheduleWorkReady&&!scheduleStorageFault.load())syncState="班表背景儲存無法使用";backendPollReady=initBackendPoll();if(!backendPollReady&&!scheduleStorageFault.load())syncState="後端服務無法使用";
   setenv("TZ","CST-8",1);tzset();WiFi.persistent(false);WiFi.mode(WIFI_STA);WiFi.setAutoReconnect(false);wifiState.phase_started_ms=millis();wifiState.retry_delay_ms=0;if(wifiProfiles.count)startWifiScan(millis());else startPortal();
-  esp_sntp_set_time_sync_notification_cb(networkClockSynced);esp_sntp_set_sync_interval(CLOCK_SYNC_INTERVAL_MS);configTime(8*3600,0,"pool.ntp.org","time.google.com");routes();proxyStarted=alarm_proxy_start()==ESP_OK;bootMs=millis();lastPoll=millis()-POLL_MS;draw();
+  esp_sntp_set_time_sync_notification_cb(networkClockSynced);esp_sntp_set_sync_interval(CLOCK_SYNC_INTERVAL_MS);configTime(8*3600,0,"pool.ntp.org","time.google.com");routes();proxyStarted=alarm_proxy_start()==ESP_OK;bootMs=millis();draw();
   ESP_ERROR_CHECK(alarm_ota_boot_self_test(otaDiagnostics,nullptr,15000));
   otaReady=alarm_ota_init(&otaConfig)==ESP_OK;if(otaReady){esp_err_t staged=alarm_ota_load_staged();alarm_ota_status_t status={};alarm_ota_get_status(&status);if(staged!=ESP_OK||status.marker_fault){otaStateSet("marker-fault","marker-fault","更新記錄狀態不明，已封鎖下載與安裝");}else if(status.staged_valid){otaReceived=status.staged.manifest.size;otaTotal=status.staged.manifest.size;otaStateSet("staged","ready","已載入完整驗證的更新，可離線安裝");}else otaResetTerminalNoStaged();}
   Serial.printf("SHIFT_ALARM_READY v%s\n",VERSION);Serial.printf("PSRAM_BYTES %lu\n",(unsigned long)ESP.getPsramSize());Serial.println(wifiProfiles.count?"BOOT_WIFI_MODE SAVED":"BOOT_WIFI_MODE FIRST_SETUP");
@@ -863,8 +973,10 @@ void loop() {
   server.handleClient();if(portal)dns.processNextRequest();uint32_t ms=millis();time_t now=time(nullptr);
   serviceWifi(ms);
   if(portal&&apCloseAt&&int32_t(ms-apCloseAt)>=0)closePortal();
+  observeBackendPollAvailability();drainBackendPollResult();drainScheduleResult();
 
   const buttons::Event event=buttons::update(buttonState,ms,!digitalRead(BUTTON_SNOOZE),!digitalRead(BUTTON_STOP),!digitalRead(BUTTON_TEST),screenAwake,ringing);
+  observeBackendPollAvailability();drainBackendPollResult();drainScheduleResult();
   pairingHoldActive=buttonState.chord&&!buttonState.pairing_sent&&!portal;
   if(pairingHoldActive)pairingHoldStarted=buttonState.chord_started_ms;
   if(event!=buttons::None){screenLastActivity=ms;uiState.last_interaction_ms=ms;forceDraw=true;}
@@ -880,9 +992,9 @@ void loop() {
   if(!ringing){
     if(event==buttons::Wake)wakeScreen();
     else if(event==buttons::CenterLong)setScreenAwake(false);
-    else if(buttons::pairingAllowed(event,ringing)){apCloseAt=0;showJoinQr=true;startPortal();}
+    else if(buttons::pairingAllowed(event,ringing)){apCloseAt=0;portalView=0;startPortal();}
     else if(event==buttons::LeftShort&&!portal)deviceui::left(uiState,ms);
-    else if(event==buttons::RightShort){if(portal)showJoinQr=!showJoinQr;else deviceui::right(uiState,ms);}
+    else if(event==buttons::RightShort){if(portal)portalView=(portalView+1)%3;else deviceui::right(uiState,ms);}
     else if(event==buttons::CenterShort&&!portal)deviceui::center(uiState,ms);
     if(deviceui::returnIfInactive(uiState,ms))forceDraw=true;
   }
@@ -890,7 +1002,7 @@ void loop() {
   const bool buttonHeld=buttonState.left.stable||buttonState.center.stable||buttonState.right.stable;
   if(screenpolicy::shouldTurnOff(screenTimeoutMinutes,ms,screenLastActivity,ringing||portal||pairingHoldActive||buttonHeld))setScreenAwake(false);
   // Saved networks do not reopen setup automatically; require the deliberate chord.
-  if(!pairingHoldActive&&ms-lastPoll>=POLL_MS){lastPoll=ms;pollBackend();}
+  if(!pairingHoldActive)startBackendPoll(ms);
   // Main alone mutates schedules/snooze and selects the next boot image.
   // UI/backend changes above precede the fresh activation guard.
   bool activation=otaActivation.exchange(false);

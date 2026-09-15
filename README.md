@@ -4,7 +4,7 @@
 
 ESP32-S3 星智 CUBE 1.54 吋獨立鬧鐘。班表與響鈴設定保存在裝置；手機在裝置網頁編輯月曆，也可經裝置的原生 Tailscale 上傳圖片至私有辨識服務。
 
-新版韌體位於 `firmware-next/`。原始碼版本為 0.3.12，後端／映像版本維持 0.1.5；後端 0.1.5 與 GN100 Caddy 離線 fallback 已於 2026-09-15 部署。第一台實機仍為 0.3.8，第二台已用隔離 provisioning 經 USB 啟動 0.3.12，並保存兩組不同 SSID。刷回不含 Wi-Fi 密碼的一般映像後，重開仍確認 profile 存在。0.3.12 在 0.3.11 的兩階段 OTA、240×240 主畫面與實體選單上，新增最多四組 Wi-Fi 與斷線自動切換。下載與安裝仍只允許 GPIO38 當下有效且 active-high 顯示充電時執行。第二台尚待驗證兩組 Wi-Fi 實際 failover、GPIO38、實體畫面、按鍵、真實 flash marker、離線安裝與新版 live OTA。
+新版韌體位於 `firmware-next/`。原始碼版本為 0.3.13，後端／映像版本維持 0.1.5；後端 0.1.5 與 GN100 Caddy 離線 fallback 已於 2026-09-15 部署。第一台實機仍為 0.3.8，第二台已用隔離 provisioning 經 USB 啟動 0.3.12，並保存兩組不同 SSID。刷回不含 Wi-Fi 密碼的一般映像後，重開仍確認 profile 存在。0.3.13 在 0.3.12 的多組 Wi-Fi 與斷線自動切換上，把後端 HTTP 與 schedule 解析／持久化移到 bounded worker；主迴圈只建立快照及套用完成驗證與讀回的有效結果。OTA 下載／安裝會等待 in-flight poll 完成，所有實體 QR 使用 scale 3。下載與安裝仍只允許 GPIO38 當下有效且 active-high 顯示充電時執行。0.3.13 尚待刷入第二台；兩組 Wi-Fi 實際 failover、GPIO38、實體畫面、按鍵、真實 flash marker、離線安裝與新版 live OTA 仍待驗證。
 
 0.2.8 已實測手機經 ESP32 與原生 Tailscale 上傳九月班表，36.851 秒辨識出正確 11 天。升至 0.3.1 後，Wi-Fi、90 度方向、11 筆鬧鐘與班表 revision 均保留。0.2.9 的首次 OTA 下載中止且保留原版本；0.3.0 起已加入十分鐘總期限、三十秒無進度保護與進度回報。0.3.2 已從 0.3.1 經原生 Tailscale 完整 OTA，下載、驗證、重開、回連與保存資料檢查均通過。
 

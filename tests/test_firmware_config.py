@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 def test_calendar_save_has_sufficient_arduino_loop_stack():
@@ -90,7 +91,10 @@ def test_reliability_contract_and_versions_are_wired():
     assert "displaySettingsValid" in source
     assert "settingsLoadValid" in source
     assert "ota_manifest::available" in source
-    assert 'set(PROJECT_VER "0.3.12")' in Path("firmware-next/CMakeLists.txt").read_text()
+    assert 'set(PROJECT_VER "0.3.13")' in Path("firmware-next/CMakeLists.txt").read_text()
+    ota_fixture = Path("firmware-next/components/alarm_ota/tests/test_real_component.c").read_text()
+    assert ota_fixture.count('version="0.3.13"') == 2
+    assert 'version="0.3.12"' not in ota_fixture
     assert "VERSION = '0.1.5'" in Path("app.py").read_text()
 
 
@@ -115,8 +119,22 @@ def test_physical_menu_draw_and_gpio_are_integrated():
     assert 'ESP.getEfuseMac()' not in source
     assert 'server.on("/api/update/download",HTTP_POST' in source
     assert 'event==buttons::CenterShort&&!portal)deviceui::center' in source
-    assert 'deviceui::PHONE_QR_X,72,deviceui::PHONE_QR_SCALE' in source
-    assert 'line(deviceui::PHONE_TEXT_X,82,"掃碼設定班表")' in source
+    qr_calls = re.findall(r"\bqr\(([^;]+)\);", source)
+    assert len(qr_calls) == 3
+    assert all(
+        call.endswith("deviceui::QR_X,deviceui::QR_Y,deviceui::QR_SCALE")
+        for call in qr_calls
+    )
+    assert not re.search(r"\bqr\([^;]+,\s*[12]\s*\);", source)
+    assert 'line(deviceui::BOTTOM_TEXT_X,deviceui::BOTTOM_TEXT_Y,"掃碼設定班表")' in source
+    assert 'portalView=(portalView+1)%3' in source
+    update_draw = source.split('uiState.page==deviceui::Page::Update)', 1)[1].split(
+        'const bool qrPage=', 1
+    )[0]
+    assert 'deviceui::QR_X,deviceui::QR_Y,deviceui::QR_SCALE' in update_draw
+    assert 'alarm_ota_download' not in update_draw
+    assert 'alarm_ota_activate' not in update_draw
+    assert 'alarm_ota_discard' not in update_draw
     assert 'const bool mainMinute=' in source
     assert 'uiState.page!=deviceui::Page::Menu' in source
     main_draw = source.split('uiState.page==deviceui::Page::Main){', 1)[1].split(
@@ -125,6 +143,73 @@ def test_physical_menu_draw_and_gpio_are_integrated():
     assert 'http://' not in main_draw
     assert 'alarm_tailnet_get_status' not in main_draw
     assert 'alarms.size()' not in main_draw
+
+
+def test_backend_poll_requires_tailnet_before_http_allocation():
+    source = Path("firmware-next/main/main.cpp").read_text()
+    start = source.split("void startBackendPoll(", 1)[1].split("\n}", 1)[0]
+    worker = source.split("void backendPollWorker(", 1)[1].split("\n}", 1)[0]
+    drain = source.split("void drainBackendPollResult(", 1)[1].split("\n}", 1)[0]
+    loop = source.split("void loop() {", 1)[1]
+    assert "connectivity::should_poll_backend" in start
+    assert "otaBusy.load()" in start
+    assert "backendpoll::canStart" in start
+    assert "xQueueSend(backendRequestQueue,&request,0)" in start
+    assert "measureJson(d)" in start and "HEARTBEAT_CAP=1024" in source
+    assert "HTTPClient" not in start
+    assert "HTTPClient" in worker and ".GET()" in worker and ".POST(" in worker
+    assert "boundedHttpBody(schedule,MAX_JSON" in worker
+    for forbidden in ("applySchedule", "prefs", "surface", "screen", "alarms", "handled", "ringing", "otaActivation"):
+        assert forbidden not in worker
+    assert "backendpoll::accepts" in drain
+    assert "enqueueScheduleWork" in drain
+    assert "secureWipeBackendExchange" in drain
+    apply_schedule = source.split("void applyScheduleCandidate(", 1)[1].split("\n}", 1)[0]
+    assert "backendpoll::invalidate(backendPollState)" in apply_schedule
+    button = loop.index("buttons::update(")
+    alarm = loop.index("alarmclock::due(")
+    drains = [match.start() for match in re.finditer(r"drainBackendPollResult\(\)", loop)]
+    assert any(offset < button for offset in drains)
+    assert any(button < offset < alarm for offset in drains)
+    assert "xQueueCreate(1,sizeof(BackendPollExchange*))" in source
+    assert 'xTaskCreate(backendPollWorker,"backend_poll",8192,nullptr,1,nullptr)' in source
+    assert "void pollBackend()" not in source
+
+
+def test_schedule_worker_and_ota_poll_gate_are_integrated():
+    source = Path("firmware-next/main/main.cpp").read_text()
+    candidate = Path("firmware-next/main/schedule_candidate.h").read_text()
+    routes = Path("firmware-next/main/local_calendar_routes.h").read_text()
+    page = Path("firmware-next/main/calendar_page.h").read_text()
+    worker = source.split("void scheduleWorker(", 1)[1].split("bool initScheduleWorker", 1)[0]
+    assert 'return "backend-poll-busy"' in source
+    assert source.count("backendpoll::blocksOta(backendPollState)") == 2
+    assert "後端同步即將完成，請稍候再試" in source
+    assert "schedulecandidate::parse" in worker
+    assert "scheduleNvsWriteExact" in worker
+    assert "nvs_open_from_partition" in source
+    for forbidden in ("applyScheduleCandidate", "alarms", "calendarMonths", "revision=", "syncState", "prefs"):
+        assert forbidden not in worker
+    post = routes.split('server.on("/api/local-calendar",HTTP_POST', 1)[1].split(
+        'server.on("/api/local-calendar/save-status"', 1
+    )[0]
+    assert "deserializeJson" not in post
+    assert "serializeJson" not in post
+    assert "prefs" not in post
+    assert "enqueueScheduleWork" in post and "server.send(202" in post
+    assert "waitForSave" in page and "save-status?id=" in page
+    assert "applyScheduleCandidate(work->candidate)" in source
+    assert "drainScheduleResult()" in source
+    assert "MAX_ALARMS=512" in candidate and "MAX_BYTES=98304" in candidate
+    assert "鬧鐘識別碼重複" in candidate and 'doc["timezone"]!="Asia/Taipei"' in candidate
+    assert 'schedule-fault-v1' in source
+    assert 'scheduleStorageFault.store(scheduleFaultMarker(false))' in source
+    assert 'savedScheduleRestored=!scheduleStorageFault.load()' in source
+    assert 'latchScheduleStorageFault()' in worker
+    assert 'if(work->persisted&&work->origin!=ScheduleOrigin::Rollback&&!scheduleNvsWriteExact(work->previous))latchScheduleStorageFault()' in worker
+    assert "schedule-storage-fault" in source and "schedule-storage-fault" in routes
+    assert "班表儲存狀態不明；重開前請勿修改" in source
+    assert "原設定已保留" not in source
 
 
 def test_multi_wifi_source_contract_is_wired_and_redacted():
