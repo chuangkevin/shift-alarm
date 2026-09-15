@@ -15,12 +15,13 @@ AI 接手規則見 `AGENTS.md`，完整現況見 `docs/AI接手開發.md`。以�
 - [x] 後端 0.1.2 已部署；Gemini `max_tokens` 預設 6000 且強制不低於 400。
 - [x] 後端 0.1.4 與 GN100 Caddy 離線 fallback 已於 2026-09-15 部署；健康檢查與在線網域回應 200。
 - [x] 第二台 ESP32-S3 已於 2026-09-15 經 USB 啟動 0.3.12；版本、`ShiftAlarm-9CA8`、寫後 SHA 通過，無 panic／boot loop／storage fault。
+- [x] 第二台已用一次性私有 seed 經正式 A/B transaction 保存兩組不同 SSID；刷回不含 Wi-Fi 密碼的一般 0.3.12 後，重開仍為 saved mode，沒有配網 AP 或 storage fault。seed 映像、NVS snapshot 與 source 巨集已清除。
 
 ## 目前可接續工作
 
 - [ ] 實機驗證 ADC2 channel 6 曲線、GPIO38 active-high 充電狀態及充滿後 fail-closed 拒絕行為。
 - [ ] 第二台裝置實機驗證 240×240 主畫面、六項選單、QR、四方向、按鍵 debounce／長按／配網 chord、響鈴優先及 15 秒返回。
-- [ ] 第二台裝置實機驗證四組 Wi-Fi 遷移、加入／更新／移除、最強訊號選擇、hidden fallback、斷線退避、AP 持續可用與 IP 變更提示。
+- [ ] 第二台裝置實機驗證兩組已保存 Wi-Fi 的連線與 failover，以及管理頁加入／更新／移除、hidden fallback、斷線退避、AP 持續可用與 IP 變更提示。
 - [ ] 實機驗證完整 staged image 跨重開保存、部分下載重開從 0、斷網離線安裝及 marker lifecycle。
 - [ ] 用真實中斷完成 HTTP Range 續傳、live OTA 與線上入口 `/device-offline`；在完成前不部署。
 
