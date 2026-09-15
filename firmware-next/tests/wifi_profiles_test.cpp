@@ -38,13 +38,22 @@ struct FakeStorage : Storage {
     memcpy(out, slots[slot].data(), slot_sizes[slot]); length = read_fault == ReadFault::SlotShortData ? slot_sizes[slot] - 1 : slot_sizes[slot]; return ReadResult::Ok;
   }
   bool writeSelector(const uint8_t *data, size_t length) override {
-    if (!allowed()) return false; memcpy(selector.data(), data, length); selector_size = length; return true;
+    if (!allowed()) return false;
+    memcpy(selector.data(), data, length);
+    selector_size = length;
+    return true;
   }
   bool writeSlot(uint8_t slot, const uint8_t *data, size_t length) override {
-    if (!allowed()) return false; memcpy(slots[slot].data(), data, length); slot_sizes[slot] = length; return true;
+    if (!allowed()) return false;
+    memcpy(slots[slot].data(), data, length);
+    slot_sizes[slot] = length;
+    return true;
   }
   bool eraseSlot(uint8_t slot) override {
-    if (!allowed()) return false; secureWipe(slots[slot].data(), slots[slot].size()); slot_sizes[slot] = 0; return true;
+    if (!allowed()) return false;
+    secureWipe(slots[slot].data(), slots[slot].size());
+    slot_sizes[slot] = 0;
+    return true;
   }
 };
 
