@@ -1,6 +1,9 @@
 #include "ota_download_policy.h"
 #include "battery_policy.h"
 #include "connectivity_policy.h"
+#include "button_policy.h"
+#include "device_identity.h"
+#include "ui_policy.h"
 #include "ota_manifest_policy.h"
 #include <Arduino.h>
 #include <WiFi.h>
@@ -19,6 +22,7 @@
 #include <nvs.h>
 #include <esp_heap_caps.h>
 #include <esp_app_desc.h>
+#include <esp_mac.h>
 #include <time.h>
 #include <sys/time.h>
 #if __has_include("provisioning.h")
@@ -68,15 +72,12 @@ extern "C" bool verifyRollbackLater(){return true;}
 String revision, backend, token, manageUrl, ssid, password, apPassword;
 int64_t handled=0,snooze=0;
 volatile bool ringing=false;
-volatile uint32_t buttonEvents=0,physicalStopDown=0,lastPlusPress=0;
-portMUX_TYPE buttonMux=portMUX_INITIALIZER_UNLOCKED;
-void IRAM_ATTR stopPressed(){portENTER_CRITICAL_ISR(&buttonMux);buttonEvents|=ringing?8:1;physicalStopDown=xTaskGetTickCountFromISR()*portTICK_PERIOD_MS;ringing=false;portEXIT_CRITICAL_ISR(&buttonMux);}
-void IRAM_ATTR snoozePressed(){portENTER_CRITICAL_ISR(&buttonMux);buttonEvents|=ringing?8:2;ringing=false;portEXIT_CRITICAL_ISR(&buttonMux);}
-void IRAM_ATTR plusPressed(){portENTER_CRITICAL_ISR(&buttonMux);uint32_t now=xTaskGetTickCountFromISR()*portTICK_PERIOD_MS;if(now-lastPlusPress>=200){lastPlusPress=now;buttonEvents|=ringing?8:4;ringing=false;}portEXIT_CRITICAL_ISR(&buttonMux);}
 uint32_t ringStarted=0,lastPoll=0,lastDraw=0,lastSerial=0,bootMs=0;
 bool portal=false;
 uint32_t pairingHoldStarted=0;
-bool pairingHoldActive=false,pairingTriggered=false;
+bool pairingHoldActive=false;
+buttons::State buttonState;
+deviceui::State uiState;
 String ringLabel="鬧鐘", syncState="等待無線網路";
 #if CUBE_TFT
 Adafruit_ST7789 screen(&SPI,14,8,18);
@@ -91,7 +92,6 @@ uint8_t displayRotation=0;
 uint16_t screenTimeoutMinutes=0;
 uint8_t screenBrightness=40;
 bool screenAwake=true;
-bool updateInfoPage=false;
 uint32_t screenLastActivity=0;
 bool forceDraw=true;
 uint32_t previousFrameHash=0;
@@ -225,66 +225,77 @@ surface.fillScreen(c);
 screen.clearDisplay();
 #endif
 }
-void line(int x,int y,String s,int size=1) {
-  surface.setTextSize(size);surface.setTextColor(0xffff);
+void lineColor(int x,int y,String s,int size,uint16_t color) {
+  surface.setTextSize(size);surface.setTextColor(color);
   for(unsigned i=0;i<s.length();) {
     uint32_t cp=(uint8_t)s[i++];
     if(cp>=0xe0&&cp<0xf0&&i+1<s.length()){cp=((cp&15)<<12)|(((uint8_t)s[i]&63)<<6)|((uint8_t)s[i+1]&63);i+=2;}
     else if(cp>=0xc0&&cp<0xe0&&i<s.length()){cp=((cp&31)<<6)|((uint8_t)s[i++]&63);}
     if(cp<128){if(x+6*size>240)break;surface.setCursor(x,y+2*size);surface.write(cp);x+=6*size;continue;}
     if(x+12*size>240)break;
-    for(const auto &g:ZH_GLYPHS)if(g.code==cp){for(int row=0;row<12;row++)for(int col=0;col<12;col++)if(g.rows[row]&(1<<(11-col)))surface.fillRect(x+col*size,y+row*size,size,size,0xffff);break;}
+    for(const auto &g:ZH_GLYPHS)if(g.code==cp){for(int row=0;row<12;row++)for(int col=0;col<12;col++)if(g.rows[row]&(1<<(11-col)))surface.fillRect(x+col*size,y+row*size,size,size,color);break;}
     x+=12*size;
   }
 }
+void line(int x,int y,String s,int size=1) { lineColor(x,y,s,size,0xffff); }
+void qr(const String &text,int x,int y,int scale){
+#if CUBE_TFT
+  if(text.isEmpty()||text.length()>180)return;
+  uint8_t data[qrcode_getBufferSize(8)];QRCode code;
+  if(qrcode_initText(&code,data,8,ECC_LOW,text.c_str())!=0)return;
+  const int quiet=4*scale;surface.fillRect(x-quiet,y-quiet,(code.size+8)*scale,(code.size+8)*scale,0xffff);
+  for(int row=0;row<code.size;row++)for(int col=0;col<code.size;col++)
+    if(qrcode_getModule(&code,col,row))surface.fillRect(x+col*scale,y+row*scale,scale,scale,0);
+#endif
+}
+int64_t nextAlarmEpoch(int64_t now){
+  int64_t next=INT64_MAX;
+  for(auto &alarm:alarms)if(alarmclock::upcoming(alarm.epoch,now,handled)&&alarm.epoch<next)next=alarm.epoch;
+  return next;
+}
+String weekday(const tm &value){static const char *days[]={"日","一","二","三","四","五","六"};return days[value.tm_wday];}
+String dateWeek(int64_t epoch){time_t value=epoch;tm local={};localtime_r(&value,&local);char date[16];snprintf(date,sizeof(date),"%02d/%02d",local.tm_mon+1,local.tm_mday);return String(date)+"（"+weekday(local)+"）";}
+String alarmTime(int64_t epoch){time_t value=epoch;tm local={};localtime_r(&value,&local);char text[8];snprintf(text,sizeof(text),"%02d:%02d",local.tm_hour,local.tm_min);return text;}
+bool backendReachableNow(uint32_t nowMs);
 String tailnetLabel(alarm_tailnet_state_t state);
 void draw() {
   if(!screenAwake)return;
-  fill(ringing && (millis()/500)%2 ? 0x7800 : 0); surface.setTextColor(0xffff);
+  fill(ringing && (millis()/500)%2 ? 0x7800 : 0x0021); surface.setTextColor(0xffff);
 #if CUBE_TFT
-  if(updateInfoPage&&!ringing&&!portal){
-    line(8,6,"檢查更新",2);line(8,40,String("目前版本：")+VERSION);
-    alarm_ota_status_t ota={};alarm_ota_get_status(&ota);
-    line(8,61,ota.marker_fault?"更新記錄狀態不明":ota.staged_valid?String("已儲存：")+ota.staged.manifest.version:"沒有已下載更新");
-    line(8,82,chargingInputValid&&charging.load()?"充電狀態：可安裝":"充電狀態：不可安裝");
-    String url=WiFi.isConnected()?String("http://")+WiFi.localIP().toString()+"/update":"請先連上無線網路";line(8,103,url);
-    if(WiFi.isConnected()&&url.length()<=180){uint8_t data[qrcode_getBufferSize(8)];QRCode qr;if(qrcode_initText(&qr,data,8,ECC_LOW,url.c_str())==0){const int scale=2,x=8,y=130;surface.fillRect(x-8,y-8,(qr.size+8)*scale,(qr.size+8)*scale,0xffff);for(int row=0;row<qr.size;row++)for(int col=0;col<qr.size;col++)if(qrcode_getModule(&qr,col,row))surface.fillRect(x+col*scale,y+row*scale,scale,scale,0);}}
-    line(115,133,"掃碼開啟更新頁");line(115,154,"實體鍵不會安裝");line(115,175,"－：返回主畫面");
-    uint16_t *pixels=frame->getBuffer();uint32_t hash=2166136261u;for(size_t i=0;i<240*240;i++){hash^=pixels[i];hash*=16777619u;}if(forceDraw||hash!=previousFrameHash){screen.drawRGBBitmap(0,0,pixels,240,240);previousFrameHash=hash;forceDraw=false;}return;
+  if(ringing){
+    line(36,52,"鬧鐘響了",2);line(24,104,ringLabel,1);line(18,166,"按任一按鈕停止",2);
+  } else if(portal&&!(WiFi.isConnected()&&apCloseAt)){
+    line(8,6,"手機設定",2);line(8,38,showJoinQr?"掃碼加入裝置熱點":"掃碼開啟設定頁");
+    String text=showJoinQr?String("WIFI:T:WPA;S:")+apName+";P:"+apPassword+";;":"http://192.168.4.1";
+    qr(text,deviceui::PHONE_QR_X,70,deviceui::PHONE_QR_SCALE);line(deviceui::PHONE_TEXT_X,76,apName);line(deviceui::PHONE_TEXT_X,96,showJoinQr?String("密碼：")+apPassword:"192.168.4.1");
+    line(deviceui::PHONE_TEXT_X,132,"右鍵切換條碼");line(deviceui::PHONE_TEXT_X,154,connecting?"正在連線":setupFailed?"連線失敗，請重試":"加入後開啟設定");
+    line(8,220,"按住左右鍵 10 秒可重新配網");
+  } else if(uiState.page==deviceui::Page::Main){
+    const int64_t now=time(nullptr);time_t current=now;tm local={};localtime_r(&current,&local);char date[40];if(clockValid())snprintf(date,sizeof(date),"%02d/%02d（%s）",local.tm_mon+1,local.tm_mday,weekday(local).c_str());else snprintf(date,sizeof(date),"--/--");lineColor(6,6,date,1,0xce79);
+    int percent=0;uint32_t age=0;const bool valid=battery::value(batteryState,millis(),percent,age);const auto batteryUi=deviceui::batteryDisplay(valid,percent);const uint16_t color=batteryUi.warning?0xf800:0xffff;
+    surface.drawRect(154,5,26,13,color);surface.fillRect(180,9,3,5,color);if(valid){const int width=(22*percent)/100;if(width)surface.fillRect(156,7,width,9,batteryUi.warning?color:0xaf7b);}lineColor(187,4,valid?String(percent)+"%":"--%",1,color);if(batteryUi.show_marker)lineColor(230,5,"!",1,color);if(chargingInputValid&&charging){lineColor(230,18,"+",1,0xaf7b);}
+    char clockText[8];if(clockValid())snprintf(clockText,sizeof(clockText),"%02d:%02d",local.tm_hour,local.tm_min);else snprintf(clockText,sizeof(clockText),"--:--");line(45,37,clockText,5);
+    const int64_t next=clockValid()?nextAlarmEpoch(now):INT64_MAX;
+    surface.drawFastHLine(8,96,224,0x31e7);
+    if(next==INT64_MAX){lineColor(8,108,"下次上班",1,0x9d34);line(142,106,"--",2);lineColor(8,137,"響鈴時間",1,0x9d34);line(142,132,"--:--",2);surface.fillRect(8,174,224,34,0x11c5);lineColor(28,180,"尚無下一次鬧鐘",2,0xaf7b);}
+    else{lineColor(8,108,"下次上班",1,0x9d34);line(142,108,dateWeek(next));lineColor(8,137,"響鈴時間",1,0x9d34);line(142,132,alarmTime(next),2);char countdown[96];deviceui::countdown(now,next,countdown,sizeof(countdown));surface.fillRect(8,174,224,34,0x11c5);lineColor(16,184,countdown,1,0xaf7b);}
+    if(!savedScheduleRestored){surface.fillRect(8,174,224,42,0xf800);line(16,187,"班表讀取失敗，鬧鐘暫停");}
+    else if(!clockValid()){surface.fillRect(8,174,224,42,0xf800);line(22,187,"等待校時，鬧鐘暫停");}
+    else if(pairingHoldActive){surface.fillRect(8,174,224,34,0x11c5);lineColor(18,184,String("配網倒數 ")+String(buttons::pairingSecondsRemaining(buttonState,millis()))+" 秒",1,0xaf7b);}
+    lineColor(36,220,"左右鍵查看資訊 · 中鍵進入",1,0x8410);
+  } else if(uiState.page==deviceui::Page::Menu){
+    static const char *items[]={"手機設定","連線狀態","班表資訊","裝置資訊","檢查更新","返回主畫面"};line(8,6,"更多資訊",2);
+    for(uint8_t i=0;i<deviceui::MENU_ITEM_COUNT;i++){const int y=38+i*30;if(i==uiState.selection){surface.fillRect(6,y-3,228,27,0xaf7b);lineColor(18,y,String("> ")+items[i],1,0x1103);}else{surface.drawRect(6,y-3,228,27,0x31e7);line(18,y,String("  ")+items[i]);}}
+  } else {
+    const int64_t now=time(nullptr),next=clockValid()?nextAlarmEpoch(now):INT64_MAX;alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);int percent=0;uint32_t age=0;const bool valid=battery::value(batteryState,millis(),percent,age);
+    if(uiState.page==deviceui::Page::PhoneSetup){line(8,6,"手機設定",2);if(WiFi.isConnected()){String url=String("http://")+WiFi.localIP().toString()+"/calendar";line(8,38,url);qr(url,deviceui::PHONE_QR_X,72,deviceui::PHONE_QR_SCALE);line(deviceui::PHONE_TEXT_X,82,"掃碼設定班表");}else{line(8,48,"尚未連上無線網路");line(8,76,"按住左右鍵 10 秒");line(8,98,"再依畫面加入裝置熱點");line(8,126,"手機開啟 192.168.4.1");}}
+    else if(uiState.page==deviceui::Page::Connectivity){line(8,6,"連線狀態",2);line(8,48,String("無線網路：")+(WiFi.isConnected()?"已連線":"未連線"));line(8,78,String("遠端連線：")+(tail.state==ALARM_TAILNET_CONNECTED?"已連線":"未連線"));line(8,108,String("後端服務：")+(backendReachableNow(millis())?"可連線":"無法連線"));line(8,146,"連線異常不影響本機鬧鐘");}
+    else if(uiState.page==deviceui::Page::Schedule){line(8,6,"班表資訊",2);line(8,44,String("下次上班：")+(next==INT64_MAX?"尚無":dateWeek(next)));line(8,70,String("響鈴時間：")+(next==INT64_MAX?"--:--":alarmTime(next)));line(8,96,String("鬧鐘數量：")+String(unsigned(alarms.size())));line(8,122,String("儲存狀態：")+(revision.isEmpty()?"尚未儲存":localSchedule?"本機已儲存":"已同步"));line(8,148,String("版次：")+(revision.isEmpty()?"--":revision.substring(0,18)));}
+    else if(uiState.page==deviceui::Page::Device){line(8,6,"裝置資訊",2);line(8,48,String("韌體版本：")+VERSION);line(8,78,String("IP：")+(WiFi.isConnected()?WiFi.localIP().toString():"未連線"));line(8,108,String("電池：")+(valid?String(percent)+"%":"未知"));line(8,134,String("充電：")+(chargingInputValid?(charging.load()?"是":"否"):"未知"));}
+    else if(uiState.page==deviceui::Page::Update){alarm_ota_status_t ota={};alarm_ota_get_status(&ota);line(8,6,"檢查更新",2);line(8,38,String("目前版本：")+VERSION);line(8,62,ota.marker_fault?"已下載狀態：異常":ota.staged_valid?String("已下載：")+ota.staged.manifest.version:"已下載：沒有");line(8,86,String("充電準備：")+(chargingInputValid&&charging.load()?"可以安裝":"尚未就緒"));if(WiFi.isConnected()){String url=String("http://")+WiFi.localIP().toString()+"/update";line(8,108,url);qr(url,8,138,1);line(78,146,"掃碼開啟更新頁");line(78,168,"實體鍵不會變更更新");}else line(8,120,"連上無線網路後顯示條碼");}
+    line(8,220,"左右切換 · 中鍵返回");
   }
-  line(8,4,"班表鬧鐘",2); line(8,31,pairingHoldActive?String("配網倒數 ")+String(10-(millis()-pairingHoldStarted)/1000):clockValid()?datetime(time(nullptr)):"等待校時",2);
-  int batteryPercent=0;uint32_t batteryAge=0;const bool batteryValid=battery::value(batteryState,millis(),batteryPercent,batteryAge);
-  const uint16_t batteryColor=batteryValid&&batteryPercent<=20?0xf800:0xffff;
-  surface.drawRect(174,5,43,19,batteryColor);surface.fillRect(217,10,3,9,batteryColor);
-  surface.fillRect(176,7,39,15,0);if(batteryValid){const int width=(39*batteryPercent)/100;if(width)surface.fillRect(176,7,width,15,batteryColor);}
-  line(176,27,batteryValid?String(batteryPercent)+"%":"--%");
-  if(chargingInputValid&&charging){surface.drawLine(224,6,220,14,batteryColor);surface.drawLine(220,14,225,14,batteryColor);surface.drawLine(225,14,221,22,batteryColor);}
-  if(batteryValid&&batteryPercent<=20)line(164,8,"!");
-  if(ringing) { line(8,58,"鬧鐘響了",2); line(8,89,"按任一按鈕停止"); }
-  else {
-    int64_t next=snooze>time(nullptr)?snooze:INT64_MAX;
-    String label="貪睡提醒";
-    for(auto &a:alarms) if(alarmclock::upcoming(a.epoch,time(nullptr),handled)&&a.epoch<next){next=a.epoch;label=a.label;}
-    line(8,62,next==INT64_MAX?"目前沒有鬧鐘":String("下次：")+datetime(next));
-    line(8,81,next==INT64_MAX?"請設定班表與時間":"上班鬧鐘");
-  }
-  const bool pairingScreen=portal&&!(WiFi.isConnected()&&apCloseAt);
-  // Keep the readable LAN address above the QR quiet zone (starts at y=122).
-  if(WiFi.isConnected())line(8,103,String("http://")+WiFi.localIP().toString()+"/display");
-  else line(8,103,pairingScreen?"http://192.168.4.1/":"無線網路未連線");
-  String qrText=pairingScreen?(showJoinQr?String("WIFI:T:WPA;S:")+apName+";P:"+apPassword+";;":"http://192.168.4.1"):(WiFi.isConnected()?String("http://")+WiFi.localIP().toString()+"/display":String());
-  if(qrText.length()&&qrText.length()<=180) {
-    uint8_t data[qrcode_getBufferSize(8)]; QRCode qr;
-    if(qrcode_initText(&qr,data,8,ECC_LOW,qrText.c_str())==0) {
-      const int scale=2, x=8,y=130;
-      surface.fillRect(x-8,y-8,(qr.size+8)*scale,(qr.size+8)*scale,0xffff);
-      for(int row=0;row<qr.size;row++)for(int col=0;col<qr.size;col++)if(qrcode_getModule(&qr,col,row))surface.fillRect(x+col*scale,y+row*scale,scale,scale,0);
-    }
-  }
-  if(pairingScreen) { line(115,130,showJoinQr?"①掃碼加入熱點":"②掃碼設定網路"); line(115,145,apName.substring(0,19)); line(115,160,"熱點密碼："); line(115,174,apPassword);line(115,190,"＋：切換條碼");line(115,204,connecting?"連線中…":setupFailed?"請重試連線":"192.168.4.1"); }
-  else { line(115,133,WiFi.isConnected()?"無線網路已連線":"無線網路未連線"); line(115,151,"掃碼設定裝置"); line(115,169,String(alarms.size())+" 個鬧鐘"); line(115,187,localSchedule?"班表已儲存":syncState=="班表已同步"?"班表已同步":"等待班表同步");alarm_tailnet_status_t ts={};alarm_tailnet_get_status(&ts);line(115,204,tailnetLabel(ts.state)); }
-  line(115,219,pairingHoldActive?"放開即取消配網":ringing?"響鈴時任意鍵停止":"換網路按＋－十秒");
-  // Compose off-screen: never clear the visible TFT between text and QR draws.
+  if(pairingHoldActive&&uiState.page!=deviceui::Page::Main){surface.fillRect(8,210,224,28,0x11c5);lineColor(34,217,String("配網倒數 ")+String(buttons::pairingSecondsRemaining(buttonState,millis()))+" 秒",1,0xaf7b);}
   uint16_t *pixels=frame->getBuffer(); uint32_t hash=2166136261u;
   for(size_t i=0;i<240*240;i++){hash^=pixels[i];hash*=16777619u;}
   if(forceDraw||hash!=previousFrameHash){screen.drawRGBBitmap(0,0,pixels,240,240);previousFrameHash=hash;forceDraw=false;}
@@ -306,8 +317,9 @@ void soundTask(void*) {
     if(result==ESP_OK&&written==sizeof(samples))speakerReady=true;
   }
 }
-void startRing(String label) { ringLabel=label; ringStarted=millis(); ringing=true; wakeScreen(); Serial.println("ALARM_RING_STARTED"); }
-void stopRing(bool doSnooze) { ringing=false; snooze=doSnooze&&clockValid()?time(nullptr)+alarmclock::SNOOZE_SECONDS:0; prefs.putLong64("snooze",snooze); Serial.println(doSnooze?"ALARM_SNOOZED":"ALARM_STOPPED"); }
+void closePortal(){if(!portal)return;portal=false;apCloseAt=0;dns.stop();WiFi.softAPdisconnect(true);WiFi.mode(WIFI_STA);}
+void startRing(String label) { ringLabel=label;ringStarted=millis();if(!ringing){closePortal();uiState.page=deviceui::Page::Main;buttons::beginRinging(buttonState,ringStarted,!digitalRead(BUTTON_SNOOZE),!digitalRead(BUTTON_STOP),!digitalRead(BUTTON_TEST));}ringing=true;wakeScreen();forceDraw=true;Serial.println("ALARM_RING_STARTED"); }
+void stopRing(bool doSnooze) { ringing=false;buttons::endRinging(buttonState);snooze=doSnooze&&clockValid()?time(nullptr)+alarmclock::SNOOZE_SECONDS:0;prefs.putLong64("snooze",snooze);forceDraw=true;Serial.println(doSnooze?"ALARM_SNOOZED":"ALARM_STOPPED"); }
 #include "calendar_metadata.h"
 JsonDocument calendarMonths;
 bool applySchedule(const String &body,bool persist,String &error) {
@@ -335,7 +347,7 @@ bool applySchedule(const String &body,bool persist,String &error) {
   if(persist&&savedSchedule()!=canonical&&prefs.putBytes("schedule",canonical.c_str(),canonical.length())!=canonical.length()){error="儲存失敗";return false;}
   if(persist&&savedSchedule()!=canonical){error="儲存驗證失敗，請重試";return false;}
   calendarMonths=std::move(nextMonths);
-  localSchedule=doc["source"]=="local";firstConsecutiveOnly=nextFirstConsecutiveOnly;alarms=std::move(next);revision=doc["revision"].as<String>();
+  localSchedule=doc["source"]=="local";firstConsecutiveOnly=nextFirstConsecutiveOnly;alarms=std::move(next);revision=doc["revision"].as<String>();forceDraw=true;
   // Authenticated LAN server also provides time if outbound NTP is unavailable.
   if(persist && !clockValid() && doc["server_time"].is<int64_t>() && doc["server_time"].as<int64_t>()>=alarmclock::VALID_CLOCK) {
     timeval tv={};tv.tv_sec=doc["server_time"].as<int64_t>();settimeofday(&tv,nullptr);
@@ -600,7 +612,7 @@ void routes() {
     page+="</select><label for='brightness'>螢幕亮度</label><select id='brightness' name='brightness'>";
     const uint8_t brightnessLevels[]={10,25,40,60,80,100};
     for(uint8_t percent:brightnessLevels)page+=String("<option value='")+percent+"'"+(screenBrightness==percent?" selected":"")+">"+percent+"%</option>";
-    page+="</select><p>降低亮度可減少背光耗電與發熱。</p><button>儲存螢幕設定</button></form><p>非響鈴時短按機殼頂部中間按鈕可立即關屏；關屏後按任一按鈕即可喚醒。鬧鐘到點會依設定亮度自動亮屏並正常響鈴，響鈴時按任一按鈕即可停止。</p><h2>時鐘校對</h2><p>固定使用臺北時間（UTC+8）；每三小時自動透過網路校時，重新開機及恢復網路後也會由網路時間服務重試。</p><a href='/clock'>手動調整時鐘</a><p id='clock-status'>正在讀取校時狀態…</p><script>async function clockStatus(){const el=document.querySelector('#clock-status');try{const r=await fetch('/api/clock');if(!r.ok)throw Error();const d=await r.json();el.textContent=d.last_sync?'最近網路校時：'+new Date(d.last_sync*1000).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})+(d.overdue?'。校時已逾期，請檢查網際網路連線。':'。每三小時自動校對。'):d.overdue?'網路校時尚未成功，請檢查網際網路連線，或到班表頁使用手機校時。':'等待首次網路校時…';}catch(e){el.textContent='無法取得校時狀態，請確認裝置連線。'}}clockStatus();setInterval(clockStatus,10000)</script><h2>韌體更新</h2><p>下載已發布版本，保留舊版供失敗時回復。</p><a href='/update'>檢查裝置更新</a><h2>Tailscale連線</h2><p>登入授權，讓裝置在不同環境仍能同步班表。</p><a href='/tailnet'>設定Tailscale</a><h2>更換無線網路</h2><p>按下後裝置會開啟配網熱點，掃描螢幕條碼即可重新選擇網路。原設定會保留到新網路連線成功。</p><form method='post' action='/wifi/reset'><input type='hidden' name='nonce' value='"+setupNonce+"'><button>重新設定無線網路</button></form><p>無法連上此頁時，可同時按住「＋」與「－」十秒，啟動配網。</p><a href='/'>返回</a>";
+    page+="</select><p>降低亮度可減少背光耗電與發熱。</p><button>儲存螢幕設定</button></form><p>非響鈴時長按機殼頂部中間按鈕 1.2 秒，放開後關屏；關屏後按任一按鈕只會喚醒。鬧鐘到點會依設定亮度自動亮屏並正常響鈴，響鈴時按任一按鈕即可停止。</p><h2>時鐘校對</h2><p>固定使用臺北時間（UTC+8）；每三小時自動透過網路校時，重新開機及恢復網路後也會由網路時間服務重試。</p><a href='/clock'>手動調整時鐘</a><p id='clock-status'>正在讀取校時狀態…</p><script>async function clockStatus(){const el=document.querySelector('#clock-status');try{const r=await fetch('/api/clock');if(!r.ok)throw Error();const d=await r.json();el.textContent=d.last_sync?'最近網路校時：'+new Date(d.last_sync*1000).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})+(d.overdue?'。校時已逾期，請檢查網際網路連線。':'。每三小時自動校對。'):d.overdue?'網路校時尚未成功，請檢查網際網路連線，或到班表頁使用手機校時。':'等待首次網路校時…';}catch(e){el.textContent='無法取得校時狀態，請確認裝置連線。'}}clockStatus();setInterval(clockStatus,10000)</script><h2>韌體更新</h2><p>下載已發布版本，保留舊版供失敗時回復。</p><a href='/update'>檢查裝置更新</a><h2>Tailscale連線</h2><p>登入授權，讓裝置在不同環境仍能同步班表。</p><a href='/tailnet'>設定Tailscale</a><h2>更換無線網路</h2><p>按下後裝置會開啟配網熱點，掃描螢幕條碼即可重新選擇網路。原設定會保留到新網路連線成功。</p><form method='post' action='/wifi/reset'><input type='hidden' name='nonce' value='"+setupNonce+"'><button>重新設定無線網路</button></form><p>無法連上此頁時，可同時按住「＋」與「－」十秒，啟動配網。</p><a href='/'>返回</a>";
     server.send(200,"text/html; charset=utf-8",devicePage(page));
   });
   server.on("/display",HTTP_POST,[]{
@@ -676,10 +688,9 @@ void setup() {
   if(!loadWifiCredentials()){setupFailed=true;}
   backend=prefs.getString("backend");if(backend=="http://192.168.18.31:8237"){backend="http://100.126.226.79:8237";prefs.putString("backend",backend);}token=prefs.getString("token");manageUrl=prefs.getString("manage");
   apPassword=prefs.getString("ap-pass");if(apPassword.isEmpty()){char b[13];snprintf(b,sizeof(b),"%08lx%04lx",(unsigned long)esp_random(),(unsigned long)(esp_random()&0xffff));apPassword=b;prefs.putString("ap-pass",apPassword);}
-  char apSuffix[5];snprintf(apSuffix,sizeof(apSuffix),"%04X",(unsigned)(ESP.getEfuseMac()&0xffff));apName=String("ShiftAlarm-")+apSuffix;
+  uint8_t staMac[6]={};ESP_ERROR_CHECK(esp_read_mac(staMac,ESP_MAC_WIFI_STA));char apSuffix[5];deviceidentity::suffix(staMac,apSuffix);apName=String("ShiftAlarm-")+apSuffix;
   String err;String stored=savedSchedule();savedScheduleRestored=!prefs.isKey("schedule")||(!stored.isEmpty()&&applySchedule(stored,false,err));
   pinMode(BUTTON_STOP,INPUT_PULLUP);pinMode(BUTTON_SNOOZE,INPUT_PULLUP);pinMode(BUTTON_TEST,INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(BUTTON_STOP),stopPressed,FALLING);attachInterrupt(digitalPinToInterrupt(BUTTON_SNOOZE),snoozePressed,FALLING);attachInterrupt(digitalPinToInterrupt(BUTTON_TEST),plusPressed,FALLING);
 #if CUBE_TFT
   frame=new GFXcanvas16(240,240);assert(frame && frame->getBuffer());
   SPI.begin(9,-1,10,14);screen.init(240,240);loadDisplaySettings();screen.setRotation(displayRotation);screen.invertDisplay(true);backlightPwm=ledcAttach(13,5000,8);if(!backlightPwm)pinMode(13,OUTPUT);setBacklight(true);screenAwake=true;screenLastActivity=millis();
@@ -715,21 +726,13 @@ void loop() {
     pendingPassword="";
   }
   if(connecting&&ms-connectStarted>=20000){connecting=false;setupFailed=true;WiFi.disconnect(false,false);}
-  if(portal&&apCloseAt&&int32_t(ms-apCloseAt)>=0){portal=false;apCloseAt=0;dns.stop();WiFi.softAPdisconnect(true);WiFi.mode(WIFI_STA);}
+  if(portal&&apCloseAt&&int32_t(ms-apCloseAt)>=0)closePortal();
 
-  static uint32_t lastButtons=0;static bool ignoreChordUntilRelease=false;
-  portENTER_CRITICAL(&buttonMux);uint32_t events=buttonEvents;buttonEvents=0;portEXIT_CRITICAL(&buttonMux);
-  if(ms-lastButtons<150)events&=9;else if(events)lastButtons=ms;
-  bool rawChord=!digitalRead(BUTTON_TEST)&&!digitalRead(BUTTON_SNOOZE);
-  if(!rawChord)ignoreChordUntilRelease=false;
-  if(events&&!screenAwake){wakeScreen();events=0;ignoreChordUntilRelease=true;}
-  else if(events)screenLastActivity=ms;
-  bool chord=rawChord&&!ignoreChordUntilRelease;
-  if(chord&&!ringing&&!portal){
-    if(!pairingHoldActive&&!pairingTriggered){pairingHoldActive=true;pairingHoldStarted=ms;}
-    if(pairingHoldActive&&ms-pairingHoldStarted>=10000){pairingHoldActive=false;pairingTriggered=true;apCloseAt=0;showJoinQr=true;startPortal();}
-  } else {pairingHoldActive=false;if(!chord)pairingTriggered=false;}
-  if(events&8)stopRing(false);else if(events&1)setScreenAwake(false);else if((events&2)&&!chord&&!portal){updateInfoPage=!updateInfoPage;forceDraw=true;}else if((events&4)&&!chord){if(portal)showJoinQr=!showJoinQr;}
+  const buttons::Event event=buttons::update(buttonState,ms,!digitalRead(BUTTON_SNOOZE),!digitalRead(BUTTON_STOP),!digitalRead(BUTTON_TEST),screenAwake,ringing);
+  pairingHoldActive=buttonState.chord&&!buttonState.pairing_sent&&!portal;
+  if(pairingHoldActive)pairingHoldStarted=buttonState.chord_started_ms;
+  if(event!=buttons::None){screenLastActivity=ms;uiState.last_interaction_ms=ms;forceDraw=true;}
+  if(event==buttons::StopAlarm)stopRing(false);
   if(clockValid()) {
     const int64_t corrected=alarmclock::reconcileHandled(now,handled);
     if(corrected!=handled){handled=corrected;prefs.putLong64("handled",handled);}
@@ -738,15 +741,29 @@ void loop() {
     if(latest!=handled){handled=latest;prefs.putLong64("handled",handled);}
     if(snooze&&now>=snooze){bool fresh=now-snooze<=alarmclock::CATCHUP_SECONDS;snooze=0;prefs.putLong64("snooze",0);if(fresh)startRing("貪睡提醒");}
   }
+  if(!ringing){
+    if(event==buttons::Wake)wakeScreen();
+    else if(event==buttons::CenterLong)setScreenAwake(false);
+    else if(buttons::pairingAllowed(event,ringing)){apCloseAt=0;showJoinQr=true;startPortal();}
+    else if(event==buttons::LeftShort&&!portal)deviceui::left(uiState,ms);
+    else if(event==buttons::RightShort){if(portal)showJoinQr=!showJoinQr;else deviceui::right(uiState,ms);}
+    else if(event==buttons::CenterShort&&!portal)deviceui::center(uiState,ms);
+    if(deviceui::returnIfInactive(uiState,ms))forceDraw=true;
+  }
   if(ringing&&millis()-ringStarted>=RING_MS)stopRing(false);
-  if(screenpolicy::shouldTurnOff(screenTimeoutMinutes,ms,screenLastActivity,ringing||portal||pairingHoldActive))setScreenAwake(false);
+  const bool buttonHeld=buttonState.left.stable||buttonState.center.stable||buttonState.right.stable;
+  if(screenpolicy::shouldTurnOff(screenTimeoutMinutes,ms,screenLastActivity,ringing||portal||pairingHoldActive||buttonHeld))setScreenAwake(false);
   // Saved networks do not reopen setup automatically; require the deliberate chord.
   if(!pairingHoldActive&&ms-lastPoll>=POLL_MS){lastPoll=ms;pollBackend();}
   // Main alone mutates schedules/snooze and selects the next boot image.
   // UI/backend changes above precede the fresh activation guard.
   bool activation=otaActivation.exchange(false);
   if(activation){refreshOtaGuard();esp_err_t result=alarm_ota_activate(&otaSession);if(result!=ESP_OK){otaBusy=false;alarm_ota_status_t status={};alarm_ota_get_status(&status);if(status.state==ALARM_OTA_IDLE)otaResetTerminalNoStaged();const bool guardBlocked=result==ALARM_OTA_ERR_CHARGING_REQUIRED||result==ALARM_OTA_ERR_UNSAFE;otaStateSet("error",status.marker_fault?"marker-fault":result==ALARM_OTA_ERR_CHARGING_REQUIRED?"charging-required":guardBlocked?"guard-rejected":"activation-failed",status.marker_fault?"更新記錄狀態不明，操作維持封鎖":result==ALARM_OTA_ERR_CHARGING_REQUIRED?"裝置未顯示充電，保留已下載更新":guardBlocked?"本機安全條件已改變，保留已下載更新":"本機驗證或啟動選擇失敗；請重新下載");}}
-  if(ms-lastDraw>=200){lastDraw=ms;draw();}
+  static int64_t renderedMinute=-1;const bool mainMinute=uiState.page==deviceui::Page::Main&&now/60!=renderedMinute;
+  const bool portalRefresh=portal&&uint32_t(ms-lastDraw)>=500;
+  const bool pairingRefresh=pairingHoldActive&&uint32_t(ms-lastDraw)>=200;
+  const bool detailRefresh=uiState.page!=deviceui::Page::Main&&uiState.page!=deviceui::Page::Menu&&uint32_t(ms-lastDraw)>=1000;
+  if(forceDraw||(ringing&&uint32_t(ms-lastDraw)>=200)||portalRefresh||pairingRefresh||mainMinute||detailRefresh){lastDraw=ms;draw();renderedMinute=now/60;}
   if(ms-lastSerial>=10000){lastSerial=ms;Serial.printf("STATUS setup=%d wifi=%d clock=%d alarms=%u ringing=%d\n",portal,WiFi.isConnected(),clockValid(),unsigned(alarms.size()),ringing);}
   delay(10);
 }

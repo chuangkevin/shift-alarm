@@ -64,6 +64,9 @@ jobs:
       - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/ota_download_policy_test.cpp -o /tmp/ota-download-test && /tmp/ota-download-test
       - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/screen_policy_test.cpp -o /tmp/screen-policy-test && /tmp/screen-policy-test
       - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/battery_policy_test.cpp -o /tmp/battery-policy-test && /tmp/battery-policy-test
+      - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/device_ui_test.cpp -o /tmp/device-ui-test && /tmp/device-ui-test
+      - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/button_policy_test.cpp -o /tmp/button-policy-test && /tmp/button-policy-test
+      - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/device_identity_test.cpp -o /tmp/device-identity-test && /tmp/device-identity-test
       - run: cc -std=c11 -Wall -Wextra -Werror -Ifirmware-next/components/alarm_tailnet/include firmware-next/components/alarm_tailnet/tests/retry_policy_test.c -o /tmp/tailnet-retry-test && /tmp/tailnet-retry-test
       - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/connectivity_policy_test.cpp -o /tmp/connectivity-policy-test && /tmp/connectivity-policy-test
       - run: c++ -std=c++17 -Wall -Wextra -Werror -Ifirmware-next/components/arduino_libraries/ArduinoJson/src firmware-next/tests/ota_manifest_policy_test.cpp -o /tmp/ota-manifest-policy-test && /tmp/ota-manifest-policy-test

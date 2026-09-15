@@ -22,9 +22,12 @@
 - 完整映像經 exact size、stream SHA、`esp_ota_end` 與 descriptor 驗證後，才把單一 bounded authenticated marker 存入既有 `alarm_nvs`。部分映像不留 marker；重開後從 byte 0 重新下載。同次開機保留 Range reconnect。
 - 安裝不依賴後端或網路；它重新驗 manifest/marker HMAC、從 partition table 推導 inactive slot、重讀整片 flash SHA/descriptor、重跑 local guards，清 marker 成功後才切 boot。boot selection 失敗時保留目前版本並要求重新下載。
 - marker I/O 結果不明時進入 fail-closed `marker-fault`。它不等同「沒有更新」：不得下載覆寫 target，也不得假設可安裝。GET／boot observation 只 load/validate，絕不 clear/store 或改 flash；可無寫入恢復 authenticated staged record或 confirmed absence。corrupt/incompatible marker 必須由明確 discard 清理，且 clear 後再次 load 確認不存在才回 idle。
-- 實體 240×240 畫面以非響鈴狀態短按「－」切換 `檢查更新` 資訊頁；只顯示版本、staged 狀態、充電 readiness 與 `/update` QR，不從實體鍵下載或安裝。響鈴任意鍵停鈴、BOOT 關屏、任意鍵喚醒及「＋」「－」十秒配網不變。
-- 後端 0.1.4 與 GN100 Caddy 離線 fallback 已於 2026-09-15 部署；韌體 0.3.10 未安裝，GPIO38、實體 240×240 UI、persisted staged image、離線安裝與 live OTA 均保留為未驗證。
+- 韌體 0.3.10 的實體更新資訊頁設計已由 0.3.11 六項選單取代；實體鍵仍不會下載、安裝或刪除更新。
+- 後端 0.1.4 與 GN100 Caddy 離線 fallback 已於 2026-09-15 部署；韌體 0.3.11 未安裝，GPIO38、實體 240×240 UI／按鍵、persisted staged image、離線安裝與 live OTA 均保留為未驗證。
 - 0.3.8 從後端 0.1.3 下載 1,617,664-byte 映像的兩次明確單次嘗試，分別在 1,309,111 與 356,671 bytes 停止，裝置回報舊版合併的 `n<=0 || alarm_ota_write` 錯誤；裝置保持健康。停止位置不固定，不能只憑這兩次結果證明單一根因。
 - 後端 0.1.4 只對 authenticated firmware binary endpoint 改用 4096-byte chunks，chunk 之間等待 5 ms；1,617,664 bytes 約 395 個 chunks，單是 pacing 約增加 2 秒，連同傳輸與 flash 寫入以約 8 秒完成為目標，仍遠低於舊版 600 秒總期限。這是降低原生 Tailnet/TCP burst pressure、協助 0.3.8 bootstrap 的 mitigation；live retry 前不宣稱已修復。
-- 2026-09-15 部署 paced stream 後的第三次 0.3.8 POST 在下載狀態重置前即 `RemoteDisconnected`；裝置仍回報前次 356,671-byte 失敗狀態。這次沒有開始寫入，paced stream 未能完成 bootstrap；不得再重送，改用 USB 資料線安裝 0.3.10。
-- 第四次改由 GN100 送出控制請求，裝置在 760,496 bytes 停止；後端 0.1.5 保留 4 KiB chunk 但移除 5 ms 間隔後，第五次仍在 358,736 bytes 停止。FileResponse、4 KiB paced 與 4 KiB continuous 都無法避免 0.3.8 在 `available()>0` 後 `read()==0` 即中止；不得再重送，先以 Mac USB 資料線 bootstrap 0.3.10。
+- 2026-09-15 部署 paced stream 後的第三次 0.3.8 POST 在下載狀態重置前即 `RemoteDisconnected`；裝置仍回報前次 356,671-byte 失敗狀態。這次沒有開始寫入，paced stream 未能完成 bootstrap；當時停止 OTA 重送並改走 USB 路徑。現行待驗證目標是 0.3.11。
+- 第四次改由 GN100 送出控制請求，裝置在 760,496 bytes 停止；後端 0.1.5 保留 4 KiB chunk 但移除 5 ms 間隔後，第五次仍在 358,736 bytes 停止。FileResponse、4 KiB paced 與 4 KiB continuous 都無法避免 0.3.8 在 `available()>0` 後 `read()==0` 即中止；不得再重送。現行下一步是第二台裝置以 Mac USB 資料線 bootstrap 0.3.11。
+- 韌體 0.3.11：240×240 主畫面只顯示日期、星期、電池、HH:MM、下次上班、響鈴時間與真實倒數；沒有未來鬧鐘時顯示 `尚無下一次鬧鐘`。QR、網址、連線、班表與更新診斷移至六項實體選單。
+- 三鍵改為純狀態機輪詢：30 ms debounce，中鍵長按 1.2 秒且放開後關屏，關屏按鍵只喚醒，左右同按 10 秒優先配網，響鈴時任一原始按鍵立即停鈴。選單 15 秒無操作返回主畫面。
+- AP 與 Tailnet 名稱尾碼改由 `esp_read_mac(..., ESP_MAC_WIFI_STA)` 的 STA MAC bytes 4、5 產生；`fc:01:2c:c9:9c:a8` 顯示 `9CA8`。目前只有來源碼、host 測試與建置驗證，第二台裝置燒錄前不宣稱硬體完成。

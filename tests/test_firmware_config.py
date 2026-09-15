@@ -57,10 +57,20 @@ def test_reliability_contract_and_versions_are_wired():
     assert 'otaBackendLatestVersion' in source
     assert 'otaLatestVersion' not in source
     assert 'if(err==ESP_OK){otaResetTerminalNoStaged();' in source
-    assert 'if(events&8)stopRing(false)' in source
-    assert 'else if(events&1)setScreenAwake(false)' in source
-    assert 'rawChord=!digitalRead(BUTTON_TEST)&&!digitalRead(BUTTON_SNOOZE)' in source
-    assert 'updateInfoPage=!updateInfoPage' in source
+    assert 'event==buttons::StopAlarm)stopRing(false)' in source
+    assert 'uiState.page=deviceui::Page::Main;buttons::beginRinging(buttonState,ringStarted,!digitalRead(BUTTON_SNOOZE),!digitalRead(BUTTON_STOP),!digitalRead(BUTTON_TEST))' in source
+    assert 'ringing=false;buttons::endRinging(buttonState)' in source
+    assert source.index('for(auto &alarm:alarms)if(alarmclock::due') < source.index(
+        'buttons::pairingAllowed(event,ringing)'
+    )
+    assert 'void closePortal()' in source
+    start_ring = source.split('void startRing(String label)', 1)[1].split(
+        'void stopRing', 1
+    )[0]
+    assert 'closePortal()' in start_ring
+    assert 'event==buttons::CenterLong)setScreenAwake(false)' in source
+    assert 'buttons::update(buttonState,ms,!digitalRead(BUTTON_SNOOZE),!digitalRead(BUTTON_STOP),!digitalRead(BUTTON_TEST)' in source
+    assert 'buttons::pairingAllowed(event,ringing)' in source
     component = Path("firmware-next/components/alarm_ota/alarm_ota.c").read_text()
     assert component.index("err = esp_ota_end(g.writer)") < component.index("g.config.marker_store(&record")
     assert component.index("activation_clear") < component.index("activation_boot")
@@ -80,5 +90,38 @@ def test_reliability_contract_and_versions_are_wired():
     assert "displaySettingsValid" in source
     assert "settingsLoadValid" in source
     assert "ota_manifest::available" in source
-    assert 'set(PROJECT_VER "0.3.10")' in Path("firmware-next/CMakeLists.txt").read_text()
+    assert 'set(PROJECT_VER "0.3.11")' in Path("firmware-next/CMakeLists.txt").read_text()
     assert "VERSION = '0.1.5'" in Path("app.py").read_text()
+
+
+def test_physical_menu_draw_and_gpio_are_integrated():
+    source = Path("firmware-next/main/main.cpp").read_text()
+    assert 'GFXcanvas16(240,240)' in source
+    assert 'screen.init(240,240)' in source
+    assert 'screen.setRotation(displayRotation)' in source
+    assert 'screen.drawRGBBitmap(0,0,pixels,240,240)' in source
+    assert 'uiState.page==deviceui::Page::Main' in source
+    assert 'uiState.page==deviceui::Page::Menu' in source
+    for label in ('手機設定', '連線狀態', '班表資訊', '裝置資訊', '檢查更新', '返回主畫面'):
+        assert label in source
+    assert '尚無下一次鬧鐘' in source
+    assert 'deviceui::countdown(now,next' in source
+    assert 'BUTTON_STOP=0, BUTTON_SNOOZE=39, BUTTON_TEST=40' in source
+    assert 'pinMode(BUTTON_STOP,INPUT_PULLUP)' in source
+    assert 'pinMode(BUTTON_SNOOZE,INPUT_PULLUP)' in source
+    assert 'pinMode(BUTTON_TEST,INPUT_PULLUP)' in source
+    assert 'attachInterrupt' not in source
+    assert 'esp_read_mac(staMac,ESP_MAC_WIFI_STA)' in source
+    assert 'ESP.getEfuseMac()' not in source
+    assert 'server.on("/api/update/download",HTTP_POST' in source
+    assert 'event==buttons::CenterShort&&!portal)deviceui::center' in source
+    assert 'deviceui::PHONE_QR_X,72,deviceui::PHONE_QR_SCALE' in source
+    assert 'line(deviceui::PHONE_TEXT_X,82,"掃碼設定班表")' in source
+    assert 'const bool mainMinute=' in source
+    assert 'uiState.page!=deviceui::Page::Menu' in source
+    main_draw = source.split('uiState.page==deviceui::Page::Main){', 1)[1].split(
+        '} else if(uiState.page==deviceui::Page::Menu)', 1
+    )[0]
+    assert 'http://' not in main_draw
+    assert 'alarm_tailnet_get_status' not in main_draw
+    assert 'alarms.size()' not in main_draw
