@@ -91,11 +91,11 @@ def test_reliability_contract_and_versions_are_wired():
     assert "displaySettingsValid" in source
     assert "settingsLoadValid" in source
     assert "ota_manifest::available" in source
-    assert 'set(PROJECT_VER "0.3.16")' in Path("firmware-next/CMakeLists.txt").read_text()
+    assert 'set(PROJECT_VER "0.3.17")' in Path("firmware-next/CMakeLists.txt").read_text()
     ota_fixture = Path("firmware-next/components/alarm_ota/tests/test_real_component.c").read_text()
-    assert ota_fixture.count('version="0.3.16"') == 2
+    assert ota_fixture.count('version="0.3.17"') == 2
     assert 'version="0.3.12"' not in ota_fixture
-    assert "VERSION = '0.1.5'" in Path("app.py").read_text()
+    assert "VERSION = '0.1.6'" in Path("app.py").read_text()
 
 
 def test_physical_menu_draw_and_gpio_are_integrated():
@@ -262,3 +262,16 @@ def test_multi_wifi_source_contract_is_wired_and_redacted():
     assert '已保存 Wi-Fi' in page
     assert 'min-height:44px' in page
     assert 'confirm(' not in page and 'alert(' not in page
+
+
+def test_recognition_budget_and_upload_limits_fit_slow_tailnet():
+    page = Path("firmware-next/main/calendar_page.h").read_text()
+    assert "Math.min(1,1100/" in page
+    assert "toBlob(resolve,'image/jpeg',0.8)" in page
+    assert "abort(),240000" in page
+    assert "abort(),60000" in page
+    assert "setInterval(refreshTodayMarker,60000)" in page
+    source = Path("app.py").read_text()
+    assert "RECOGNITION_SECONDS', '180'" in source
+    assert "im.thumbnail((1600, 1600))" in source
+    assert "im.save(b, 'JPEG', quality=80)" in source

@@ -218,3 +218,10 @@ def test_recognition_deadline_cancels_and_preserves_schedule(monkeypatch):
     assert len(client.get('/api/state').json()['months']) == 1
     with app.database() as c:
         assert c.execute('SELECT count(*) FROM drafts').fetchone()[0] == 0
+
+
+def test_recognition_seconds_stays_bounded():
+    assert app.recognition_seconds('180') == 180
+    assert app.recognition_seconds('10') == 30
+    assert app.recognition_seconds('9999') == 200
+    assert app.recognition_seconds('not-a-number') == 180

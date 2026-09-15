@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-set(PROJECT_VER "0.3.16")
+set(PROJECT_VER "0.3.17")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(xingzhi-cube-1.54tft-wifi)
 idf_component_get_property(arduino_core espressif__arduino-esp32 COMPONENT_LIB)

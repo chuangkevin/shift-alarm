@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError, model_validator
 
-VERSION = '0.1.5'
+VERSION = '0.1.6'
 TZ = ZoneInfo('Asia/Taipei')
 DATA = Path(os.environ.get('ALARM_DATA', './data'))
 DATA.mkdir(parents=True, exist_ok=True)
@@ -57,7 +57,13 @@ ALLOWED_HOSTS = set(os.environ.get('ALLOWED_HOSTS', '127.0.0.1,localhost,alarm.s
 ALLOWED_HOSTS.add(urlsplit(MANAGEMENT_URL).hostname)
 app = FastAPI(title='班表鬧鐘', version=VERSION, docs_url=None, redoc_url=None, openapi_url=None)
 import_lock = asyncio.Lock()
-RECOGNITION_SECONDS = 45
+def recognition_seconds(value: str) -> int:
+    try:
+        return max(30, min(200, int(value)))
+    except ValueError:
+        return 180
+
+RECOGNITION_SECONDS = recognition_seconds(os.environ.get('RECOGNITION_SECONDS', '180'))
 recognition_log = logging.getLogger("uvicorn.error")
 OFFLINE_STYLE = (
     ':root{font-family:-apple-system,BlinkMacSystemFont,"Noto Sans TC",sans-serif;'
@@ -501,9 +507,9 @@ def normalize_image(raw):
             raise ValueError('圖片太大，請縮小後再試')
         im.load()
         im = im.convert('RGB')
-        im.thumbnail((2200, 2200))
+        im.thumbnail((1600, 1600))
         b = io.BytesIO()
-        im.save(b, 'JPEG', quality=92)
+        im.save(b, 'JPEG', quality=80)
         return b.getvalue()
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
         raise ValueError('圖片無法讀取，請使用 JPG、PNG 或 WebP') from e
@@ -564,7 +570,7 @@ async def import_month(file: UploadFile = File(...), month: str = Form(...)):
             m = await asyncio.wait_for(recognize(normalized, month), timeout=RECOGNITION_SECONDS)
         except asyncio.TimeoutError as e:
             recognition_log.warning("Schedule recognition timed out after %.1fs", time.monotonic() - started)
-            raise HTTPException(504, '班表辨識超過 45 秒，已停止等待；請重試或直接調整月曆，原有班表保留') from e
+            raise HTTPException(504, f'班表辨識超過 {int(RECOGNITION_SECONDS)} 秒，已停止等待；請重試或直接調整月曆，原有班表保留') from e
         except httpx.HTTPError as e:
             raise HTTPException(502, '辨識服務連線失敗或逾時，原有班表保留') from e
         recognition_log.info("Schedule recognition completed in %.1fs", time.monotonic() - started)
