@@ -23,6 +23,11 @@ int main() {
   assert(!elapsed(998, before_wrap, 2000));
   assert(elapsed(999, before_wrap, 2000));
   assert(!elapsed(100, 50, CONNECT_TIMEOUT_MS));
+  assert(!deadlineReached(100, 400));
+  assert(deadlineReached(400, 400));
+  assert(deadlineReached(401, 400));
+  assert(!deadlineReached(UINT32_MAX - 15, 16));
+  assert(deadlineReached(16, 16));
 
   State state;
   beginScan(state, UINT32_MAX - 10);

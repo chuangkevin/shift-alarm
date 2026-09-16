@@ -513,7 +513,7 @@ void serviceWifi(uint32_t now){
     wifiMigrationAttempt=now;wifiprofiles::Selector committed;const auto result=persistWifiProfiles(wifiProfiles,committed);
     if(result==wifiprofiles::CommitResult::Committed){wifiSelector=committed;wifiSelectorValid=true;prefs.remove(WIFI_CREDENTIALS_KEY);prefs.remove("ssid");prefs.remove("password");wifiMigrationPending=false;}
   }
-  if(wifiPendingTrial&&!wifiTrialStarted&&wififailover::elapsed(now,wifiTrialAt,0)){wifiTrialStarted=true;connectStarted=now;Serial.printf("WIFI_TRIAL_BEGIN ssid=%s\n",pendingSsid.c_str());WiFi.begin(pendingSsid.c_str(),pendingPassword.c_str());}
+  if(wifiPendingTrial&&!wifiTrialStarted&&wififailover::deadlineReached(now,wifiTrialAt)){wifiTrialStarted=true;connectStarted=now;Serial.printf("WIFI_TRIAL_BEGIN ssid=%s\n",pendingSsid.c_str());WiFi.begin(pendingSsid.c_str(),pendingPassword.c_str());}
   if(WiFi.isConnected()){
     if(wifiPendingTrial&&pendingSsid.equals(WiFi.SSID().c_str(),WiFi.SSID().length())){
       wifiprofiles::List next=wifiProfiles;

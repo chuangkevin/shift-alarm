@@ -58,6 +58,34 @@ def test_recognition_switches_model_after_transient_failure(monkeypatch):
     assert result.month == '2026-09'
     assert calls == ['primary-vision', 'backup-vision']
 
+
+def test_recognition_switches_model_after_transport_timeout(monkeypatch):
+    calls = []
+    days = [{'date': f'2026-09-{day:02}', 'source_label': '休假', 'classification': 'off'}
+            for day in range(1, 31)]
+
+    class Reply:
+        status_code = 200
+        def json(self):
+            return {'choices': [{'message': {'content': json.dumps({'month': '2026-09', 'days': days})}}]}
+
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, _url, headers, json):
+            calls.append(json['model'])
+            if len(calls) == 1:
+                raise app.httpx.ReadTimeout('slow route')
+            return Reply()
+
+    async def no_wait(_seconds): pass
+    monkeypatch.setattr(app, 'NEWAPI_MODELS', ('primary-vision', 'backup-vision'))
+    monkeypatch.setattr(app.httpx, 'AsyncClient', lambda **_kwargs: Client())
+    monkeypatch.setattr(app.asyncio, 'sleep', no_wait)
+    result = asyncio.run(app.recognize(b'image', '2026-09'))
+    assert result.month == '2026-09'
+    assert calls == ['primary-vision', 'backup-vision']
+
 def month(m='2026-09'):
     return {'month': m, 'days': [{'date': d, 'source_label': '上班' if d.endswith('-13') else '休假', 'classification': 'work' if d.endswith('-13') else 'off'} for d in sorted(app.month_dates(m))]}
 

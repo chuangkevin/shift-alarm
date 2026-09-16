@@ -161,6 +161,19 @@ class Tests(unittest.TestCase):
         after['alarmCount'] = 3; after['revision'] = 'synced'
         self.assertTrue(check())
 
+    def test_saved_settings_are_always_checked_without_backend(self):
+        before = {'rotation': 90, 'localSchedule': True, 'screenTimeoutMinutes': 5,
+                  'screenBrightness': 25, 'firstConsecutiveOnly': True,
+                  'revision': 'saved', 'alarmCount': 4}
+        ota.verify_saved_settings(dict(before), before)
+        for key, bad in [('rotation', 0), ('localSchedule', False),
+                         ('screenTimeoutMinutes', 15), ('screenBrightness', 100),
+                         ('firstConsecutiveOnly', False), ('revision', 'lost'),
+                         ('alarmCount', 0)]:
+            after = dict(before); after[key] = bad
+            with self.assertRaises(ValueError):
+                ota.verify_saved_settings(after, before)
+
     def test_redirect_refused(self):
         with self.assertRaises(ValueError): ota.NoRedirect().redirect_request(None)
 

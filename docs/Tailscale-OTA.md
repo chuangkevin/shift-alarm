@@ -33,6 +33,7 @@ python3 deploy/ota_tailnet.py \
 ```sh
 python3 deploy/ota_tailnet.py \
   --device http://裝置-Tailscale-IP \
+  --backend http://100.127.82.47:8237 \
   --version 新版本 --install --wait-seconds 900
 ```
 

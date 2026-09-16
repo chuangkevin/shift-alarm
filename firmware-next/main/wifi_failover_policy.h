@@ -53,6 +53,10 @@ inline bool elapsed(uint32_t now, uint32_t started, uint32_t duration) {
   return uint32_t(now - started) >= duration;
 }
 
+inline bool deadlineReached(uint32_t now, uint32_t deadline) {
+  return int32_t(now - deadline) >= 0;
+}
+
 inline uint32_t backoffMs(uint8_t failures) {
   uint32_t delay = BACKOFF_INITIAL_MS;
   for (uint8_t i = 1; i < failures && delay < BACKOFF_MAX_MS; ++i) delay = delay > BACKOFF_MAX_MS / 2 ? BACKOFF_MAX_MS : delay * 2;

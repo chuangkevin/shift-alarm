@@ -95,7 +95,7 @@ def test_reliability_contract_and_versions_are_wired():
     ota_fixture = Path("firmware-next/components/alarm_ota/tests/test_real_component.c").read_text()
     assert ota_fixture.count('version="0.3.25"') == 2
     assert 'version="0.3.12"' not in ota_fixture
-    assert "VERSION = '0.1.7'" in Path("app.py").read_text()
+    assert "VERSION = '0.1.8'" in Path("app.py").read_text()
 
 
 def test_physical_menu_draw_and_gpio_are_integrated():
@@ -308,7 +308,7 @@ def test_manual_wifi_setup_waits_for_disconnect_to_settle():
     handler = source.split('server.on("/setup"', 1)[1].split('server.onNotFound', 1)[0]
     assert "WiFi.begin(" not in handler
     assert "wifiTrialStarted=false;wifiTrialAt=now+wififailover::DISCONNECT_SETTLE_MS" in handler
-    assert 'wifiPendingTrial&&!wifiTrialStarted&&wififailover::elapsed(now,wifiTrialAt,0)' in source
+    assert 'wifiPendingTrial&&!wifiTrialStarted&&wififailover::deadlineReached(now,wifiTrialAt)' in source
     assert 'wifiTrialStarted=true;connectStarted=now' in source
     assert 'WIFI_TRIAL_BEGIN' in source
     pending = source.split('void clearPendingWifi()', 1)[1].split('}', 1)[0]

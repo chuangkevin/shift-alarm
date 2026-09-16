@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError, model_validator
 
-VERSION = '0.1.7'
+VERSION = '0.1.8'
 TZ = ZoneInfo('Asia/Taipei')
 DATA = Path(os.environ.get('ALARM_DATA', './data'))
 DATA.mkdir(parents=True, exist_ok=True)
@@ -539,7 +539,16 @@ async def recognize(raw, month):
         while True:
             model = NEWAPI_MODELS[attempt % len(NEWAPI_MODELS)]
             payload['model'] = model
-            r = await client.post(NEWAPI_URL + '/chat/completions', headers={'Authorization': 'Bearer ' + NEWAPI_KEY}, json=payload)
+            try:
+                r = await client.post(NEWAPI_URL + '/chat/completions', headers={'Authorization': 'Bearer ' + NEWAPI_KEY}, json=payload)
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                wait = min(10, attempt + 2)
+                recognition_log.warning('Recognition model %s transport failed (%s); trying another route', model, type(exc).__name__)
+                if time.monotonic() + wait >= deadline:
+                    raise HTTPException(503, '所有圖片辨識模型目前連線失敗或逾時，請稍後重試；原有鬧鐘不受影響') from exc
+                attempt += 1
+                await asyncio.sleep(wait)
+                continue
             if r.status_code == 200:
                 break
             if r.status_code not in (429, 500, 502, 503, 504):

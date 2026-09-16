@@ -112,11 +112,7 @@ def preflight(client, device, backend=None, token=None, expected=None, action='d
     return headers, status, manifest
 
 
-def verify_after(after, before, native, device, backend):
-    from urllib.parse import urlsplit
-    if (after.get('backendTransport') != 'tailscale'
-            or after.get('backendHost') != urlsplit(backend).hostname):
-        raise ValueError('Updated backend transport mismatch')
+def verify_saved_settings(after, before):
     for key in ('rotation', 'localSchedule'):
         if after.get(key) != before.get(key):
             raise ValueError('Saved setting changed')
@@ -127,6 +123,14 @@ def verify_after(after, before, native, device, backend):
         for key in ('revision', 'alarmCount'):
             if key not in before or after.get(key) != before[key]:
                 raise ValueError('Saved local schedule changed')
+
+
+def verify_after(after, before, native, device, backend):
+    from urllib.parse import urlsplit
+    verify_saved_settings(after, before)
+    if (after.get('backendTransport') != 'tailscale'
+            or after.get('backendHost') != urlsplit(backend).hostname):
+        raise ValueError('Updated backend transport mismatch')
     return (native.get('connected') is True and native.get('acl_ready') is True
             and 'http://' + native.get('ip', '') == device)
 
@@ -203,6 +207,7 @@ def main():
                 continue
             if after.get('version') != args.version:
                 continue
+            verify_saved_settings(after, before)
             if args.backend:
                 page = client.request(args.device + '/update')
                 nonce = re.search(r"const nonce='([0-9a-f]{32})'", page)
