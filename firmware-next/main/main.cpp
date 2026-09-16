@@ -13,6 +13,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
+#include "wifi_indicator.h"
 #include "backend_endpoint.h"
 #include <DNSServer.h>
 #include <Preferences.h>
@@ -340,6 +341,22 @@ String dateWeek(int64_t epoch){time_t value=epoch;tm local={};localtime_r(&value
 String alarmTime(int64_t epoch){time_t value=epoch;tm local={};localtime_r(&value,&local);char text[8];snprintf(text,sizeof(text),"%02d:%02d",local.tm_hour,local.tm_min);return text;}
 bool backendReachableNow(uint32_t nowMs);
 String tailnetLabel(alarm_tailnet_state_t state);
+wifiindicator::Value wifiIndicatorValue(){
+  const bool trying=connecting||wifiState.phase==wififailover::Phase::Scanning||wifiState.phase==wififailover::Phase::Connecting;
+  return wifiindicator::value(WiFi.isConnected(),trying,WiFi.isConnected()?WiFi.RSSI():0);
+}
+void drawWifiIndicator(){
+  const auto v=wifiIndicatorValue();
+  const int x=wifiindicator::X,y=wifiindicator::Y;
+  surface.fillRect(x,y,wifiindicator::WIDTH,wifiindicator::HEIGHT,0x0021);
+  for(int i=0;i<4;i++){
+    const int height=4+i*3;
+    const uint16_t color=v.state==wifiindicator::State::Connected&&i<v.bars?0xaf7b:0x4208;
+    surface.fillRect(x+i*6,y+14-height,4,height,color);
+  }
+  if(v.state==wifiindicator::State::Offline){surface.drawLine(x+2,y+1,x+21,y+15,0xf800);surface.drawLine(x+21,y+1,x+2,y+15,0xf800);}
+  else if(v.state==wifiindicator::State::Connecting){surface.drawCircle(x+26,y+7,2,0xffe0);}
+}
 void draw() {
   if(!screenAwake)return;
   fill(ringing && (millis()/500)%2 ? 0x7800 : 0x0021); surface.setTextColor(0xffff);
@@ -359,7 +376,8 @@ void draw() {
     const int64_t now=time(nullptr);time_t current=now;tm local={};localtime_r(&current,&local);char date[40];if(clockValid())snprintf(date,sizeof(date),"%02d/%02d（%s）",local.tm_mon+1,local.tm_mday,weekday(local).c_str());else snprintf(date,sizeof(date),"--/--");lineColor(6,6,date,1,0xce79);
     int percent=0;uint32_t age=0;const bool valid=battery::value(batteryState,millis(),percent,age);const auto batteryUi=deviceui::batteryDisplay(valid,percent);const uint16_t color=batteryUi.warning?0xf800:0xffff;
     surface.drawRect(154,5,26,13,color);surface.fillRect(180,9,3,5,color);if(valid){const int width=(22*percent)/100;if(width)surface.fillRect(156,7,width,9,batteryUi.warning?color:0xaf7b);}lineColor(187,4,valid?String(percent)+"%":"--%",1,color);if(batteryUi.show_marker)lineColor(230,5,"!",1,color);if(chargingInputValid&&charging){lineColor(230,18,"+",1,0xaf7b);}
-    char clockText[8];if(clockValid())snprintf(clockText,sizeof(clockText),"%02d:%02d",local.tm_hour,local.tm_min);else snprintf(clockText,sizeof(clockText),"--:--");line(45,37,clockText,5);
+     drawWifiIndicator();
+     char clockText[8];if(clockValid())snprintf(clockText,sizeof(clockText),"%02d:%02d",local.tm_hour,local.tm_min);else snprintf(clockText,sizeof(clockText),"--:--");line(45,37,clockText,5);
     const int64_t next=clockValid()?nextAlarmEpoch(now):INT64_MAX;
     surface.drawFastHLine(8,96,224,0x31e7);
     if(next==INT64_MAX){lineColor(8,108,"下次上班",1,0x9d34);line(142,106,"--",2);lineColor(8,137,"響鈴時間",1,0x9d34);line(142,132,"--:--",2);surface.fillRect(8,174,224,34,0x11c5);lineColor(28,180,"尚無下一次鬧鐘",2,0xaf7b);}
@@ -517,6 +535,7 @@ void serviceWifi(uint32_t now){
       for(size_t p=0;p<wifiProfiles.count;p++)for(int i=0;i<scan;i++)if(WiFi.SSID(i).equals(wifiProfiles.profiles[p].ssid.c_str())){
         if(!observations[p].visible||WiFi.RSSI(i)>observations[p].rssi)observations[p]={true,WiFi.RSSI(i)};
       }
+      for(size_t p=0;p<wifiProfiles.count;p++)Serial.printf("WIFI_SCAN_SAVED index=%u visible=%d rssi=%d\n",unsigned(p),observations[p].visible,observations[p].rssi);
       wififailover::scanned(wifiState,wififailover::candidates(wifiProfiles,observations),now);continueSavedWifi(now);
     }else if(scan==WIFI_SCAN_FAILED||wififailover::elapsed(now,connectStarted,15000)){WiFi.scanDelete();wifiBackoff(now);}
     return;
@@ -986,6 +1005,7 @@ void setup() {
     ESP_ERROR_CHECK(alarm_proxy_init(endpoint.host,endpoint.port));
   }
   scheduleWorkReady=initScheduleWorker();if(!scheduleWorkReady&&!scheduleStorageFault.load())syncState="班表背景儲存無法使用";backendPollReady=initBackendPoll();if(!backendPollReady&&!scheduleStorageFault.load())syncState="後端服務無法使用";
+  WiFi.onEvent([](WiFiEvent_t,WiFiEventInfo_t info){Serial.printf("WIFI_DISCONNECTED reason=%u\n",unsigned(info.wifi_sta_disconnected.reason));},ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   setenv("TZ","CST-8",1);tzset();WiFi.persistent(false);WiFi.mode(WIFI_STA);WiFi.setAutoReconnect(false);wifiState.phase_started_ms=millis();wifiState.retry_delay_ms=0;if(wifiProfiles.count)startWifiScan(millis());else startPortal();
   esp_sntp_set_time_sync_notification_cb(networkClockSynced);esp_sntp_set_sync_interval(CLOCK_SYNC_INTERVAL_MS);configTime(8*3600,0,"pool.ntp.org","time.google.com");routes();proxyStarted=alarm_proxy_start()==ESP_OK;bootMs=millis();draw();
   ESP_ERROR_CHECK(alarm_ota_boot_self_test(otaDiagnostics,nullptr,15000));
@@ -1038,6 +1058,17 @@ void loop() {
   bool activation=otaActivation.exchange(false);
   if(activation){refreshOtaGuard();esp_err_t result=alarm_ota_activate(&otaSession);if(result!=ESP_OK){otaBusy=false;alarm_ota_status_t status={};alarm_ota_get_status(&status);if(status.state==ALARM_OTA_IDLE)otaResetTerminalNoStaged();const bool guardBlocked=result==ALARM_OTA_ERR_CHARGING_REQUIRED||result==ALARM_OTA_ERR_UNSAFE;otaStateSet("error",status.marker_fault?"marker-fault":result==ALARM_OTA_ERR_CHARGING_REQUIRED?"charging-required":guardBlocked?"guard-rejected":"activation-failed",status.marker_fault?"更新記錄狀態不明，操作維持封鎖":result==ALARM_OTA_ERR_CHARGING_REQUIRED?"裝置未顯示充電，保留已下載更新":guardBlocked?"本機安全條件已改變，保留已下載更新":"本機驗證或啟動選擇失敗；請重新下載");}}
   static int64_t renderedMinute=-1;const bool mainMinute=uiState.page==deviceui::Page::Main&&now/60!=renderedMinute;
+  static uint32_t wifiDrawAt=0;static wifiindicator::Value displayedWifi={wifiindicator::State::Offline,0};
+  if(uint32_t(ms-wifiDrawAt)>=1000){
+    wifiDrawAt=ms;const auto currentWifi=wifiIndicatorValue();
+    if(wifiindicator::changed(displayedWifi,currentWifi)&&screenAwake&&!ringing&&!portal&&uiState.page==deviceui::Page::Main){
+#if CUBE_TFT
+      drawWifiIndicator();
+      for(int row=0;row<wifiindicator::HEIGHT;row++)screen.drawRGBBitmap(wifiindicator::X,wifiindicator::Y+row,frame->getBuffer()+(wifiindicator::Y+row)*240+wifiindicator::X,wifiindicator::WIDTH,1);
+#endif
+    }
+    displayedWifi=currentWifi;
+  }
   const bool portalRefresh=portal&&uint32_t(ms-lastDraw)>=500;
   const bool pairingRefresh=pairingHoldActive&&uint32_t(ms-lastDraw)>=200;
   const bool detailRefresh=uiState.page!=deviceui::Page::Main&&uiState.page!=deviceui::Page::Menu&&uint32_t(ms-lastDraw)>=1000;

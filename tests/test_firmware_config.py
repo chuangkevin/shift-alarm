@@ -91,9 +91,9 @@ def test_reliability_contract_and_versions_are_wired():
     assert "displaySettingsValid" in source
     assert "settingsLoadValid" in source
     assert "ota_manifest::available" in source
-    assert 'set(PROJECT_VER "0.3.23")' in Path("firmware-next/CMakeLists.txt").read_text()
+    assert 'set(PROJECT_VER "0.3.24")' in Path("firmware-next/CMakeLists.txt").read_text()
     ota_fixture = Path("firmware-next/components/alarm_ota/tests/test_real_component.c").read_text()
-    assert ota_fixture.count('version="0.3.23"') == 2
+    assert ota_fixture.count('version="0.3.24"') == 2
     assert 'version="0.3.12"' not in ota_fixture
     assert "VERSION = '0.1.7'" in Path("app.py").read_text()
 
