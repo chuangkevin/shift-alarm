@@ -11,7 +11,9 @@ typedef struct {
  struct {uint32_t ip;uint16_t port;bool is_ipv6;} endpoints[ML_MAX_ENDPOINTS];
  int endpoint_count;
 } ml_peer_update_t;
+typedef struct {const char *device_name,*auth_key;bool enable_derp;unsigned max_peers;uint32_t priority_peer_ip;} microlink_config_t;
 typedef struct microlink_s {
+ microlink_config_t config;
  ml_security_t security;uint32_t vpn_ip;bool key_expired;int64_t key_expiry_epoch;
  uint8_t wg_public_key[32];
  cJSON *peer_map;bool peer_map_dirty;void *peer_update_queue;
@@ -21,7 +23,6 @@ int xQueueSend(void *queue,const void *item,unsigned timeout);
 uint64_t ml_get_time_ms(void);
 #include "esp_err.h"
 typedef void *QueueHandle_t;
-typedef struct {const char *device_name,*auth_key;bool enable_derp;unsigned max_peers;} microlink_config_t;
 #define ML_MAX_PEERS 64
 QueueHandle_t xQueueCreate(unsigned capacity,unsigned size);
 void vQueueDelete(QueueHandle_t q);
