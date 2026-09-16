@@ -15,6 +15,7 @@ jobs:
       - run: node --check static/app.js
       - run: node firmware-next/tests/ota_status_browser_test.js
       - run: node firmware-next/tests/wifi_ui_contract_test.js
+      - run: python firmware-next/tests/check_embedded_scripts.py
       - run: docker build -t shift-alarm:check .
   firmware:
     runs-on: ubuntu-latest
