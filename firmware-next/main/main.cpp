@@ -103,7 +103,8 @@ extern "C" bool verifyRollbackLater(){return true;}
 String revision, backend, token, manageUrl, apPassword;
 wifiprofiles::List wifiProfiles;
 wififailover::State wifiState;
-bool wifiPendingTrial=false;
+bool wifiPendingTrial=false,wifiTrialStarted=false;
+uint32_t wifiTrialAt=0;
 bool wifiMigrationPending=false;
 uint32_t wifiMigrationAttempt=0;
 wifiprofiles::Selector wifiSelector;
@@ -490,7 +491,7 @@ void connectSavedWifi(size_t index,uint32_t now){
   Serial.printf("WIFI_CONNECT_ATTEMPT index=%u ssid=%s\n",unsigned(index),profile.ssid.c_str());
   WiFi.begin(profile.ssid.c_str(),profile.password.c_str());wifiState.phase=wififailover::Phase::Connecting;wifiState.phase_started_ms=now;connectStarted=now;
 }
-void clearPendingWifi(){pendingPassword.clear();pendingSsid.clear();wifiPendingTrial=false;connecting=false;}
+void clearPendingWifi(){pendingPassword.clear();pendingSsid.clear();wifiPendingTrial=false;wifiTrialStarted=false;wifiTrialAt=0;connecting=false;}
 void restartWifiSelection(uint32_t now){
   wifiState={};wifiState.phase_started_ms=now;wifiState.retry_delay_ms=0;
   if(wifiProfiles.count)startWifiScan(now);else startPortal();
@@ -512,6 +513,7 @@ void serviceWifi(uint32_t now){
     wifiMigrationAttempt=now;wifiprofiles::Selector committed;const auto result=persistWifiProfiles(wifiProfiles,committed);
     if(result==wifiprofiles::CommitResult::Committed){wifiSelector=committed;wifiSelectorValid=true;prefs.remove(WIFI_CREDENTIALS_KEY);prefs.remove("ssid");prefs.remove("password");wifiMigrationPending=false;}
   }
+  if(wifiPendingTrial&&!wifiTrialStarted&&wififailover::elapsed(now,wifiTrialAt,0)){wifiTrialStarted=true;connectStarted=now;Serial.printf("WIFI_TRIAL_BEGIN ssid=%s\n",pendingSsid.c_str());WiFi.begin(pendingSsid.c_str(),pendingPassword.c_str());}
   if(WiFi.isConnected()){
     if(wifiPendingTrial&&pendingSsid.equals(WiFi.SSID().c_str(),WiFi.SSID().length())){
       wifiprofiles::List next=wifiProfiles;
@@ -959,8 +961,8 @@ void routes() {
     wifiprofiles::Profile candidate{s.c_str(),s.length(),p.c_str(),p.length()};
     if(!wifiprofiles::valid(candidate)){wipeString(p);wipeString(s);server.send(422,"text/plain; charset=utf-8","網路名稱須為 1 至 32 bytes；密碼須留空或為 8 至 63 bytes");return;}
     if(wifiprofiles::indexOf(wifiProfiles,candidate.ssid.c_str(),candidate.ssid.size())<0&&wifiProfiles.count>=wifiprofiles::MAX_PROFILES){wipeString(p);wipeString(s);server.send(409,"text/plain; charset=utf-8","已保存 4 組網路，請先明確移除一組");return;}
-    const uint32_t now=millis();cancelWifiSelection(now);startPortal();pendingSsid=candidate.ssid;pendingPassword=candidate.password;wipeString(p);wipeString(s);connecting=true;setupFailed=false;wifiPendingTrial=true;connectStarted=now;apCloseAt=0;
-    WiFi.begin(pendingSsid.c_str(),pendingPassword.c_str());server.send(202,"application/json","{\"connecting\":true}");
+    const uint32_t now=millis();cancelWifiSelection(now);startPortal();pendingSsid=candidate.ssid;pendingPassword=candidate.password;wipeString(p);wipeString(s);connecting=true;setupFailed=false;wifiPendingTrial=true;wifiTrialStarted=false;wifiTrialAt=now+wififailover::DISCONNECT_SETTLE_MS;connectStarted=now;apCloseAt=0;
+    server.send(202,"application/json","{\"connecting\":true}");
   });
   server.onNotFound([]{if(portal){server.sendHeader("Location","http://192.168.4.1/");server.send(302,"text/plain","");}else server.send(404,"text/plain; charset=utf-8","找不到此頁面");}); server.begin();deviceRoutesReady=true;
 }

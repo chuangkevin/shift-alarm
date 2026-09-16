@@ -301,3 +301,15 @@ def test_wifi_rescan_is_available_from_the_manager_page():
     assert "'/api/wifi/scan'" in page and "'X-Setup-Nonce':nonce" in page
     assert page.count("min-height:44px") >= 2
     assert "setInterval" in page and "clearInterval(scanPoll)" in page
+
+
+def test_manual_wifi_setup_waits_for_disconnect_to_settle():
+    source = Path("firmware-next/main/main.cpp").read_text()
+    handler = source.split('server.on("/setup"', 1)[1].split('server.onNotFound', 1)[0]
+    assert "WiFi.begin(" not in handler
+    assert "wifiTrialStarted=false;wifiTrialAt=now+wififailover::DISCONNECT_SETTLE_MS" in handler
+    assert 'wifiPendingTrial&&!wifiTrialStarted&&wififailover::elapsed(now,wifiTrialAt,0)' in source
+    assert 'wifiTrialStarted=true;connectStarted=now' in source
+    assert 'WIFI_TRIAL_BEGIN' in source
+    pending = source.split('void clearPendingWifi()', 1)[1].split('}', 1)[0]
+    assert "wifiTrialStarted=false;wifiTrialAt=0" in pending
