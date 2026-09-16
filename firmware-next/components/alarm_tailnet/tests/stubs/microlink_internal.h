@@ -34,3 +34,6 @@ esp_err_t microlink_stop(microlink_t *m);
 void microlink_destroy(microlink_t *m);
 bool microlink_is_connected(const microlink_t *m);
 void microlink_ip_to_str(uint32_t ip,char *out);
+typedef struct microlink_tcp_socket_s microlink_tcp_socket_t;
+microlink_tcp_socket_t *microlink_tcp_connect(microlink_t *m,uint32_t ip,uint16_t port,uint32_t timeout_ms);
+int microlink_tcp_detach_fd(microlink_tcp_socket_t *socket);

@@ -26,6 +26,9 @@ void microlink_destroy(microlink_t*m){atomic_fetch_add(&destroys,1);vSemaphoreDe
 void ml_security_close(microlink_t*m){m->security.ready=false;}
 bool microlink_is_connected(const microlink_t*m){return m!=NULL&&atomic_load(&active_client)==m;}
 void microlink_ip_to_str(uint32_t ip,char*out){(void)ip;strcpy(out,"100.64.0.1");}
+/* This lifecycle harness has no network transport; connections fail closed. */
+microlink_tcp_socket_t *microlink_tcp_connect(microlink_t*m,uint32_t ip,uint16_t port,uint32_t timeout_ms){(void)m;(void)ip;(void)port;(void)timeout_ms;return NULL;}
+int microlink_tcp_detach_fd(microlink_tcp_socket_t*s){(void)s;return -1;}
 esp_err_t nvs_open(const char*s,int mode,nvs_handle_t*n){(void)s;(void)mode;*n=1;return ESP_OK;}
 esp_err_t nvs_set_blob(nvs_handle_t n,const char*k,const void*v,size_t len){(void)n;(void)v;(void)len;if(strcmp(k,"wg_private")==0)atomic_fetch_add(&identity_writes,1);return ESP_OK;}
 esp_err_t nvs_commit(nvs_handle_t n){(void)n;return ESP_OK;}
