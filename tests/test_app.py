@@ -295,3 +295,23 @@ def test_recognition_seconds_stays_bounded():
     assert app.recognition_seconds('10') == 30
     assert app.recognition_seconds('9999') == 200
     assert app.recognition_seconds('not-a-number') == 180
+
+
+def test_recognition_reads_reasoning_when_content_is_null(monkeypatch):
+    days = [{'date': f'2026-09-{day:02}', 'source_label': '休假', 'classification': 'off'}
+            for day in range(1, 31)]
+
+    class Reply:
+        status_code = 200
+        def json(self):
+            return {'choices': [{'message': {'content': None,
+                                             'reasoning': json.dumps({'month': '2026-09', 'days': days})}}]}
+
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, _url, headers, json): return Reply()
+
+    monkeypatch.setattr(app.httpx, 'AsyncClient', lambda **_kwargs: Client())
+    result = asyncio.run(app.recognize(b'image', '2026-09'))
+    assert result.month == '2026-09' and len(result.days) == 30

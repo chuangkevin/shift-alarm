@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError, model_validator
 
-VERSION = '0.1.8'
+VERSION = '0.1.9'
 TZ = ZoneInfo('Asia/Taipei')
 DATA = Path(os.environ.get('ALARM_DATA', './data'))
 DATA.mkdir(parents=True, exist_ok=True)
@@ -560,7 +560,10 @@ async def recognize(raw, month):
             attempt += 1
             await asyncio.sleep(wait)
         try:
-            text = r.json()['choices'][0]['message']['content']
+            message = r.json()['choices'][0]['message']
+            # Some served models (for example qwen3 with a reasoning parser) return the
+            # answer in `reasoning` and leave `content` null.
+            text = message.get('content') or message.get('reasoning') or ''
             result = json.loads(text)
             m = Month.model_validate(result)
             validate_month(m)
