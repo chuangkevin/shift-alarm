@@ -91,9 +91,9 @@ def test_reliability_contract_and_versions_are_wired():
     assert "displaySettingsValid" in source
     assert "settingsLoadValid" in source
     assert "ota_manifest::available" in source
-    assert 'set(PROJECT_VER "0.3.24")' in Path("firmware-next/CMakeLists.txt").read_text()
+    assert 'set(PROJECT_VER "0.3.25")' in Path("firmware-next/CMakeLists.txt").read_text()
     ota_fixture = Path("firmware-next/components/alarm_ota/tests/test_real_component.c").read_text()
-    assert ota_fixture.count('version="0.3.24"') == 2
+    assert ota_fixture.count('version="0.3.25"') == 2
     assert 'version="0.3.12"' not in ota_fixture
     assert "VERSION = '0.1.7'" in Path("app.py").read_text()
 
@@ -287,3 +287,17 @@ def test_recognition_budget_and_upload_limits_fit_slow_tailnet():
     assert "RECOGNITION_SECONDS', '180'" in source
     assert "im.thumbnail((1600, 1600))" in source
     assert "im.save(b, 'JPEG', quality=80)" in source
+
+
+def test_wifi_rescan_is_available_from_the_manager_page():
+    source = Path("firmware-next/main/main.cpp").read_text()
+    page = Path("firmware-next/main/wifi_page.h").read_text()
+    route = source.split('server.on("/api/wifi/scan"', 1)[1].split('server.on("/api/wifi/remove"', 1)[0]
+    assert "if(!localNonce())return;" in route
+    assert "connecting||wifiState.phase==wififailover::Phase::Scanning" in route
+    assert "WiFi.scanNetworks(true,true)" in route and "WIFI_SCAN_FAILED" in route
+    assert '"scanning"' in source
+    assert 'id="wifi-rescan"' in page and "type=\"button\"" in page
+    assert "'/api/wifi/scan'" in page and "'X-Setup-Nonce':nonce" in page
+    assert page.count("min-height:44px") >= 2
+    assert "setInterval" in page and "clearInterval(scanPoll)" in page

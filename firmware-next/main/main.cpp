@@ -914,9 +914,15 @@ void routes() {
   server.on("/api/stop",HTTP_POST,[]{if(!authorized())return;stopRing(false);server.send(200,"application/json","{\"ok\":true}");});
   server.on("/api/wifi",HTTP_GET,[]{
     JsonDocument d;d["connected"]=WiFi.isConnected();d["connecting"]=connecting;d["failed"]=setupFailed;d["storageFault"]=wifiStorageFault;d["ip"]=WiFi.localIP().toString();d["management_url"]=manageUrl;
-    auto list=d["networks"].to<JsonArray>();int n=WiFi.scanComplete();for(int i=0;i<n;i++){auto a=list.add<JsonObject>();a["ssid"]=WiFi.SSID(i);a["rssi"]=WiFi.RSSI(i);}if(n==WIFI_SCAN_FAILED&&!connecting&&wifiState.phase!=wififailover::Phase::Scanning)WiFi.scanNetworks(true,true);
+    auto list=d["networks"].to<JsonArray>();int n=WiFi.scanComplete();d["scanning"]=n==WIFI_SCAN_RUNNING;for(int i=0;i<n;i++){auto a=list.add<JsonObject>();a["ssid"]=WiFi.SSID(i);a["rssi"]=WiFi.RSSI(i);}if(n==WIFI_SCAN_FAILED&&!connecting&&wifiState.phase!=wififailover::Phase::Scanning)WiFi.scanNetworks(true,true);
     auto profiles=d["profiles"].to<JsonArray>();for(size_t p=0;p<wifiProfiles.count;p++){auto profile=profiles.add<JsonObject>();profile["ssid"]=wifiProfiles.profiles[p].ssid.c_str();profile["connected"]=WiFi.isConnected()&&WiFi.SSID().equals(wifiProfiles.profiles[p].ssid.c_str());bool visible=false;int strongest=-127;for(int i=0;i<n;i++)if(WiFi.SSID(i).equals(wifiProfiles.profiles[p].ssid.c_str())){visible=true;strongest=std::max(strongest,int(WiFi.RSSI(i)));}profile["visible"]=visible;if(visible)profile["rssi"]=strongest;else profile["rssi"]=nullptr;}
     String out;serializeJson(d,out);server.send(200,"application/json",out);
+  });
+  server.on("/api/wifi/scan",HTTP_POST,[]{
+    if(!localNonce())return;
+    if(connecting||wifiState.phase==wififailover::Phase::Scanning){server.send(409,"text/plain; charset=utf-8","裝置正在連線或掃描，請稍候再試");return;}
+    if(WiFi.scanNetworks(true,true)==WIFI_SCAN_FAILED){server.send(503,"text/plain; charset=utf-8","掃描無法啟動，請稍後再試");return;}
+    server.send(202,"text/plain; charset=utf-8","正在掃描無線網路");
   });
   server.on("/api/wifi/remove",HTTP_POST,[]{
     if(!localNonce())return;
