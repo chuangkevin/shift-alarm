@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError, model_validator
 
-VERSION = '0.1.9'
+VERSION = '0.1.10'
 TZ = ZoneInfo('Asia/Taipei')
 DATA = Path(os.environ.get('ALARM_DATA', './data'))
 DATA.mkdir(parents=True, exist_ok=True)
@@ -50,6 +50,16 @@ def recognition_models(primary: str, configured: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(model.strip() for model in ordered if model.strip()))
 
 NEWAPI_MODELS = recognition_models(NEWAPI_MODEL, os.environ.get('NEWAPI_MODELS', ''))
+
+def recognition_targets(primary_url: str, fallback_url: str, models: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
+    """Local model stays on the primary endpoint; cloud routes need their own base URL."""
+    targets = [(primary_url, models[0])]
+    if fallback_url:
+        targets += [(fallback_url, model) for model in models[1:]]
+    return tuple(targets)
+
+NEWAPI_FALLBACK_URL = os.environ.get('NEWAPI_FALLBACK_URL', '').rstrip('/')
+NEWAPI_TARGETS = recognition_targets(NEWAPI_URL, NEWAPI_FALLBACK_URL, NEWAPI_MODELS)
 
 def recognition_token_budget(value: str) -> int:
     try:
@@ -537,10 +547,10 @@ async def recognize(raw, month):
     async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=8)) as client:
         attempt = 0
         while True:
-            model = NEWAPI_MODELS[attempt % len(NEWAPI_MODELS)]
+            base, model = NEWAPI_TARGETS[attempt % len(NEWAPI_TARGETS)]
             payload['model'] = model
             try:
-                r = await client.post(NEWAPI_URL + '/chat/completions', headers={'Authorization': 'Bearer ' + NEWAPI_KEY}, json=payload)
+                r = await client.post(base + '/chat/completions', headers={'Authorization': 'Bearer ' + NEWAPI_KEY}, json=payload)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 wait = min(10, attempt + 2)
                 recognition_log.warning('Recognition model %s transport failed (%s); trying another route', model, type(exc).__name__)
@@ -551,6 +561,12 @@ async def recognize(raw, month):
                 continue
             if r.status_code == 200:
                 break
+            if r.status_code == 404:
+                recognition_log.warning('Recognition model %s is not served by its endpoint; trying another route', model)
+                attempt += 1
+                if attempt % len(NEWAPI_TARGETS) == 0:
+                    raise HTTPException(502, '圖片辨識模型設定不符，請通知系統管理員；原有鬧鐘不受影響')
+                continue
             if r.status_code not in (429, 500, 502, 503, 504):
                 raise HTTPException(502, f'班表辨識服務回應 {r.status_code}，請稍後重試；原有鬧鐘不受影響')
             wait = min(10, attempt + 2)

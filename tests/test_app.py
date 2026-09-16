@@ -51,7 +51,8 @@ def test_recognition_switches_model_after_transient_failure(monkeypatch):
     async def no_wait(_seconds):
         pass
 
-    monkeypatch.setattr(app, 'NEWAPI_MODELS', ('primary-vision', 'backup-vision'))
+    monkeypatch.setattr(app, 'NEWAPI_TARGETS', (('http://primary/v1', 'primary-vision'),
+                                                ('http://backup/v1', 'backup-vision')))
     monkeypatch.setattr(app.httpx, 'AsyncClient', lambda **_kwargs: Client())
     monkeypatch.setattr(app.asyncio, 'sleep', no_wait)
     result = asyncio.run(app.recognize(b'image', '2026-09'))
@@ -79,7 +80,8 @@ def test_recognition_switches_model_after_transport_timeout(monkeypatch):
             return Reply()
 
     async def no_wait(_seconds): pass
-    monkeypatch.setattr(app, 'NEWAPI_MODELS', ('primary-vision', 'backup-vision'))
+    monkeypatch.setattr(app, 'NEWAPI_TARGETS', (('http://primary/v1', 'primary-vision'),
+                                                ('http://backup/v1', 'backup-vision')))
     monkeypatch.setattr(app.httpx, 'AsyncClient', lambda **_kwargs: Client())
     monkeypatch.setattr(app.asyncio, 'sleep', no_wait)
     result = asyncio.run(app.recognize(b'image', '2026-09'))
@@ -315,3 +317,41 @@ def test_recognition_reads_reasoning_when_content_is_null(monkeypatch):
     monkeypatch.setattr(app.httpx, 'AsyncClient', lambda **_kwargs: Client())
     result = asyncio.run(app.recognize(b'image', '2026-09'))
     assert result.month == '2026-09' and len(result.days) == 30
+
+
+def test_recognition_targets_keep_cloud_routes_on_their_own_endpoint():
+    models = ('qwen3vl-8b-fp8', 'gemini-3.8-flash', 'gemini-flash')
+    local = 'http://100.127.82.47:8002/v1'
+    cloud = 'https://newapi.sisihome.org/v1'
+    assert app.recognition_targets(local, '', models) == ((local, 'qwen3vl-8b-fp8'),)
+    assert app.recognition_targets(local, cloud, models) == (
+        (local, 'qwen3vl-8b-fp8'), (cloud, 'gemini-3.8-flash'), (cloud, 'gemini-flash'))
+
+
+def test_recognition_skips_missing_route_then_uses_fallback(monkeypatch):
+    calls = []
+    days = [{'date': f'2026-09-{day:02}', 'source_label': '休假', 'classification': 'off'}
+            for day in range(1, 31)]
+
+    class Reply:
+        def __init__(self, status):
+            self.status_code = status
+        def json(self):
+            return {'choices': [{'message': {'content': json.dumps({'month': '2026-09', 'days': days})}}]}
+
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def post(self, url, headers, json):
+            calls.append((url, json['model']))
+            return Reply(404 if len(calls) == 1 else 200)
+
+    async def no_wait(_seconds): pass
+    monkeypatch.setattr(app, 'NEWAPI_TARGETS', (('http://local/v1', 'local-vl'),
+                                                ('http://cloud/v1', 'cloud-vl')))
+    monkeypatch.setattr(app.httpx, 'AsyncClient', lambda **_kwargs: Client())
+    monkeypatch.setattr(app.asyncio, 'sleep', no_wait)
+    result = asyncio.run(app.recognize(b'image', '2026-09'))
+    assert result.month == '2026-09'
+    assert calls == [('http://local/v1/chat/completions', 'local-vl'),
+                     ('http://cloud/v1/chat/completions', 'cloud-vl')]
