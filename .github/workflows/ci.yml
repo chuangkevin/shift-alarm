@@ -70,6 +70,7 @@ jobs:
       - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/device_ui_test.cpp -o /tmp/device-ui-test && /tmp/device-ui-test
       - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/wifi_indicator_test.cpp -o /tmp/wifi-indicator-test && /tmp/wifi-indicator-test
       - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/button_policy_test.cpp -o /tmp/button-policy-test && /tmp/button-policy-test
+      - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/nature_alarm_sound_test.cpp -o /tmp/nature-alarm-sound-test && /tmp/nature-alarm-sound-test
       - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/device_identity_test.cpp -o /tmp/device-identity-test && /tmp/device-identity-test
       - run: cc -std=c11 -Wall -Wextra -Werror -Ifirmware-next/components/alarm_tailnet/include firmware-next/components/alarm_tailnet/tests/retry_policy_test.c -o /tmp/tailnet-retry-test && /tmp/tailnet-retry-test
       - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/connectivity_policy_test.cpp -o /tmp/connectivity-policy-test && /tmp/connectivity-policy-test

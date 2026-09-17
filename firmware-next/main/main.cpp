@@ -51,6 +51,7 @@
 #include "clock_page.h"
 #include "screen_policy.h"
 #include "schedule_candidate.h"
+#include "nature_alarm_sound.h"
 
 const char *const VERSION=esp_app_get_description()->version;
 constexpr size_t MAX_ALARMS=schedulecandidate::MAX_ALARMS, MAX_JSON=schedulecandidate::MAX_BYTES;
@@ -457,10 +458,10 @@ void draw() {
 #endif
 }
 void soundTask(void*) {
-  int16_t samples[256*2]; uint32_t phase=0;
+  int16_t samples[256*2]; naturealarm::State soundState;
   for(;;) {
-    bool play=ringing && (millis()%1000)<700;
-    for(int i=0;i<256;i++) { int16_t v=play?((phase++%24)<12?5000:-5000):0; samples[i*2]=samples[i*2+1]=v; }
+    const bool play=ringing;
+    for(int i=0;i<256;i++) { const int16_t v=naturealarm::nextSample(soundState,play); samples[i*2]=samples[i*2+1]=v; }
     size_t written=0;esp_err_t result=i2s_write(I2S_NUM_0,samples,sizeof(samples),&written,portMAX_DELAY);
     if(result==ESP_OK&&written==sizeof(samples))speakerReady=true;
   }
@@ -943,7 +944,7 @@ void routes() {
     page+="</select><label for='brightness'>螢幕亮度</label><select id='brightness' name='brightness'>";
     const uint8_t brightnessLevels[]={10,25,40,60,80,100};
     for(uint8_t percent:brightnessLevels)page+=String("<option value='")+percent+"'"+(screenBrightness==percent?" selected":"")+">"+percent+"%</option>";
-    page+="</select><p>降低亮度可減少背光耗電與發熱。</p><button>儲存螢幕設定</button></form><p>非響鈴時長按機殼頂部中間按鈕 1.2 秒，放開後關屏；關屏後按任一按鈕只會喚醒。鬧鐘到點會依設定亮度自動亮屏並正常響鈴，響鈴時按任一按鈕即可停止。</p><h2>時鐘校對</h2><p>固定使用臺北時間（UTC+8）；每三小時自動透過網路校時，重新開機及恢復網路後也會由網路時間服務重試。</p><a href='/clock'>手動調整時鐘</a><p id='clock-status'>正在讀取校時狀態…</p><script>async function clockStatus(){const el=document.querySelector('#clock-status');try{const r=await fetch('/api/clock');if(!r.ok)throw Error();const d=await r.json();el.textContent=d.last_sync?'最近網路校時：'+new Date(d.last_sync*1000).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})+(d.overdue?'。校時已逾期，請檢查網際網路連線。':'。每三小時自動校對。'):d.overdue?'網路校時尚未成功，請檢查網際網路連線，或到班表頁使用手機校時。':'等待首次網路校時…';}catch(e){el.textContent='無法取得校時狀態，請確認裝置連線。'}}clockStatus();setInterval(clockStatus,10000)</script><h2>韌體更新</h2><p>下載已發布版本，保留舊版供失敗時回復。</p><a href='/update'>檢查裝置更新</a><h2>Tailscale連線</h2><p>登入授權，讓裝置在不同環境仍能同步班表。</p><a href='/tailnet'>設定Tailscale</a>";
+    page+="</select><p>降低亮度可減少背光耗電與發熱。</p><button>儲存螢幕設定</button></form><p>非響鈴時長按機殼頂部中間按鈕 1.2 秒，放開後關屏；關屏後按下並放開中間按鈕即可喚醒。鬧鐘到點會依設定亮度自動亮屏並正常響鈴，響鈴時按任一按鈕即可停止。</p><h2>時鐘校對</h2><p>固定使用臺北時間（UTC+8）；每三小時自動透過網路校時，重新開機及恢復網路後也會由網路時間服務重試。</p><a href='/clock'>手動調整時鐘</a><p id='clock-status'>正在讀取校時狀態…</p><script>async function clockStatus(){const el=document.querySelector('#clock-status');try{const r=await fetch('/api/clock');if(!r.ok)throw Error();const d=await r.json();el.textContent=d.last_sync?'最近網路校時：'+new Date(d.last_sync*1000).toLocaleString('zh-TW',{timeZone:'Asia/Taipei'})+(d.overdue?'。校時已逾期，請檢查網際網路連線。':'。每三小時自動校對。'):d.overdue?'網路校時尚未成功，請檢查網際網路連線，或到班表頁使用手機校時。':'等待首次網路校時…';}catch(e){el.textContent='無法取得校時狀態，請確認裝置連線。'}}clockStatus();setInterval(clockStatus,10000)</script><h2>韌體更新</h2><p>下載已發布版本，保留舊版供失敗時回復。</p><a href='/update'>檢查裝置更新</a><h2>Tailscale連線</h2><p>登入授權，讓裝置在不同環境仍能同步班表。</p><a href='/tailnet'>設定Tailscale</a>";
     page+=WIFI_MANAGER_PAGE;page.replace("WIFI_NONCE",setupNonce);
     page+="<h2>配網熱點</h2><p>需要從熱點操作時才啟動。已保存網路不會被清除。</p><form method='post' action='/wifi/reset'><input type='hidden' name='nonce' value='"+setupNonce+"'><button>啟動配網熱點</button></form><p>無法連上此頁時，可同時按住「＋」與「－」十秒，啟動配網。</p><a href='/'>返回</a>";
     server.send(200,"text/html; charset=utf-8",devicePage(page));

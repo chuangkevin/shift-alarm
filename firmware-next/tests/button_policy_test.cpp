@@ -34,6 +34,17 @@ int main() {
   assert(tick(wake, 1762, false, false, false, false) == Event::Wake);
   assert(tick(wake, 1763, false, false, false, true) == Event::None);
 
+  // The center button is the normal wake control: a regular debounced tap
+  // wakes on release, without requiring the long noise filter used by sides.
+  buttons::State center_wake;
+  tick(center_wake, 0, false, false, false, false);
+  tick(center_wake, 1000, false, false, false, false);
+  tick(center_wake, 1001, false, true, false, false);
+  tick(center_wake, 1031, false, true, false, false);
+  tick(center_wake, 1091, false, true, false, false);
+  tick(center_wake, 1092, false, false, false, false);
+  assert(tick(center_wake, 1122, false, false, false, false) == Event::Wake);
+
   buttons::State wake_noise;
   tick(wake_noise, 0, false, false, false, false);
   tick(wake_noise, 1000, false, false, false, false);
@@ -53,9 +64,9 @@ int main() {
   assert(tick(wake_stuck, 11031, false, false, false, false) == Event::None);
   tick(wake_stuck, 11032, false, true, false, false);
   tick(wake_stuck, 11062, false, true, false, false);
-  tick(wake_stuck, 11762, false, true, false, false);
-  tick(wake_stuck, 11763, false, false, false, false);
-  assert(tick(wake_stuck, 11793, false, false, false, false) == Event::Wake);
+  tick(wake_stuck, 11122, false, true, false, false);
+  tick(wake_stuck, 11123, false, false, false, false);
+  assert(tick(wake_stuck, 11153, false, false, false, false) == Event::Wake);
 
   buttons::State wake_chord;
   tick(wake_chord, 0, false, false, false, false);
