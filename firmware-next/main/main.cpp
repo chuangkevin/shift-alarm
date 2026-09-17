@@ -335,6 +335,22 @@ void qr(const String &text,int x,int y,int scale){
 }
 bool weeklyConfigured(){return weeklyprofiles::valid(weeklyProfiles.as<JsonVariantConst>());}
 String weeklyPersonName(const char *key){return strcmp(key,"kevin")==0?"Kevin":"晴晴";}
+int64_t weeklyPersonNextEpoch(int64_t now,int64_t handledEpoch,const char *person){
+ if(!weeklyConfigured()||(strcmp(person,"kevin")!=0&&strcmp(person,"qingqing")!=0))return INT64_MAX;
+ time_t base=now;tm today={};localtime_r(&base,&today);int64_t best=INT64_MAX;
+ for(int delta=0;delta<=7;delta++){
+  tm date=today;date.tm_mday+=delta;date.tm_hour=12;date.tm_min=0;date.tm_sec=0;time_t noon=mktime(&date);localtime_r(&noon,&date);
+  const char *group=date.tm_wday==4?"thursday":(date.tm_wday>=1&&date.tm_wday<=5?"regular":nullptr);if(!group)continue;
+  String timesKey=String(group)+"_times",disabledKey=String("disabled_")+group+"_times";std::set<String> disabled;
+  for(JsonVariantConst item:weeklyProfiles[person][disabledKey].as<JsonArrayConst>())disabled.insert(item.as<String>());
+  for(JsonVariantConst item:weeklyProfiles[person][timesKey].as<JsonArrayConst>()){
+   String text=item.as<String>();if(disabled.count(text))continue;int hour,minute;if(!localcalendar::time(text.c_str(),hour,minute))continue;
+   tm candidate=date;candidate.tm_hour=hour;candidate.tm_min=minute;candidate.tm_sec=0;const int64_t epoch=mktime(&candidate);
+   if(alarmclock::upcoming(epoch,now,handledEpoch)&&epoch<best)best=epoch;
+  }
+ }
+ return best;
+}
 void weeklyOccurrence(int64_t now,bool dueOnly,int64_t handledEpoch,int64_t &best,String &label){
  if(!weeklyConfigured())return;
  time_t base=now;tm today={};localtime_r(&base,&today);
@@ -404,9 +420,12 @@ void draw() {
      drawWifiIndicator();
      char clockText[8];if(clockValid())snprintf(clockText,sizeof(clockText),"%02d:%02d",local.tm_hour,local.tm_min);else snprintf(clockText,sizeof(clockText),"--:--");line(45,37,clockText,5);
     const int64_t next=clockValid()?nextAlarmEpoch(now):INT64_MAX;
+    const int64_t kevinNext=clockValid()?weeklyPersonNextEpoch(now,handled,"kevin"):INT64_MAX;
+    const int64_t qingqingNext=clockValid()?weeklyPersonNextEpoch(now,handled,"qingqing"):INT64_MAX;
     surface.drawFastHLine(8,96,224,0x31e7);
-    if(next==INT64_MAX){lineColor(8,108,"下次上班",1,0x9d34);line(142,106,"--",2);lineColor(8,137,"響鈴時間",1,0x9d34);line(142,132,"--:--",2);surface.fillRect(8,174,224,34,0x11c5);lineColor(28,180,"尚無下一次鬧鐘",2,0xaf7b);}
-    else{lineColor(8,108,"下次上班",1,0x9d34);line(142,108,dateWeek(next));lineColor(8,137,"響鈴時間",1,0x9d34);line(142,132,alarmTime(next),2);char countdown[96];deviceui::countdown(now,next,countdown,sizeof(countdown));surface.fillRect(8,174,224,34,0x11c5);lineColor(16,184,countdown,1,0xaf7b);}
+    lineColor(8,108,"Kevin",1,0x9d34);line(52,108,kevinNext==INT64_MAX?"尚無":dateWeek(kevinNext));line(184,108,kevinNext==INT64_MAX?"--:--":alarmTime(kevinNext));
+    lineColor(8,137,"晴晴",1,0x9d34);line(52,137,qingqingNext==INT64_MAX?"尚無":dateWeek(qingqingNext));line(184,137,qingqingNext==INT64_MAX?"--:--":alarmTime(qingqingNext));
+    surface.fillRect(8,174,224,34,0x11c5);if(next==INT64_MAX)lineColor(28,180,"尚無下一次鬧鐘",2,0xaf7b);else{char countdown[96];deviceui::countdown(now,next,countdown,sizeof(countdown));lineColor(16,184,countdown,1,0xaf7b);}
     if(!savedScheduleRestored){surface.fillRect(8,174,224,42,0xf800);line(16,187,"班表讀取失敗，鬧鐘暫停");}
     else if(!clockValid()){surface.fillRect(8,174,224,42,0xf800);line(22,187,"等待校時，鬧鐘暫停");}
     else if(pairingHoldActive){surface.fillRect(8,174,224,34,0x11c5);lineColor(18,184,String("配網倒數 ")+String(buttons::pairingSecondsRemaining(buttonState,millis()))+" 秒",1,0xaf7b);}

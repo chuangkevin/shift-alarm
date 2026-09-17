@@ -91,9 +91,9 @@ def test_reliability_contract_and_versions_are_wired():
     assert "displaySettingsValid" in source
     assert "settingsLoadValid" in source
     assert "ota_manifest::available" in source
-    assert 'set(PROJECT_VER "0.4.2")' in Path("firmware-next/CMakeLists.txt").read_text()
+    assert 'set(PROJECT_VER "0.4.5")' in Path("firmware-next/CMakeLists.txt").read_text()
     ota_fixture = Path("firmware-next/components/alarm_ota/tests/test_real_component.c").read_text()
-    assert ota_fixture.count('version="0.4.2"') == 2
+    assert ota_fixture.count('version="0.4.5"') == 2
     assert 'version="0.3.12"' not in ota_fixture
     assert "VERSION = '0.1.10'" in Path("app.py").read_text()
 
@@ -153,12 +153,23 @@ def test_shared_page_shell_keeps_markup_before_page_local_style():
     assert 'http://' not in main_draw
     assert 'alarm_tailnet_get_status' not in main_draw
     assert 'alarms.size()' not in main_draw
+    assert 'weeklyPersonNextEpoch(now,handled,"kevin")' in main_draw
+    assert 'weeklyPersonNextEpoch(now,handled,"qingqing")' in main_draw
+    assert 'lineColor(8,108,"Kevin"' in main_draw
+    assert 'lineColor(8,137,"晴晴"' in main_draw
 
 
 def test_tft_font_contains_every_weekday_glyph():
     glyphs = Path("firmware-next/main/zh_glyphs.h").read_text()
-    for character in "日一二三四五六（）":
+    for character in "日一二三四五六（）晴":
         assert f"{{{ord(character)}," in glyphs
+
+
+def test_tft_font_contains_every_non_ascii_character_used_by_physical_ui():
+    source = Path("firmware-next/main/main.cpp").read_text()
+    glyphs = Path("firmware-next/main/zh_glyphs.h").read_text()
+    codes = {int(value) for value in re.findall(r"^\{(\d+),", glyphs, re.MULTILINE)}
+    assert {ord(character) for character in source if ord(character) > 127} <= codes
 
 
 def test_backend_poll_requires_tailnet_before_http_allocation():

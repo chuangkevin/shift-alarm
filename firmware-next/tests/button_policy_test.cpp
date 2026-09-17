@@ -24,13 +24,22 @@ int main() {
 
   buttons::State wake;
   tick(wake, 0, true, false, false, false);
-  assert(tick(wake, 30, true, false, false, false) == Event::Wake);
-  tick(wake, 31, false, false, false, true);
-  assert(tick(wake, 61, false, false, false, true) == Event::None);
+  assert(tick(wake, 30, true, false, false, false) == Event::None);
+  assert(tick(wake, 279, true, false, false, false) == Event::None);
+  assert(tick(wake, 280, true, false, false, false) == Event::Wake);
+  tick(wake, 281, false, false, false, true);
+  assert(tick(wake, 311, false, false, false, true) == Event::None);
+
+  buttons::State wake_noise;
+  tick(wake_noise, 0, true, false, false, false);
+  tick(wake_noise, 30, true, false, false, false);
+  tick(wake_noise, 120, false, false, false, false);
+  assert(tick(wake_noise, 150, false, false, false, false) == Event::None);
 
   buttons::State wake_chord;
   tick(wake_chord, 0, true, false, true, false);
-  assert(tick(wake_chord, 30, true, false, true, false) == Event::Wake);
+  assert(tick(wake_chord, 30, true, false, true, false) == Event::None);
+  assert(tick(wake_chord, 280, true, false, true, false) == Event::Wake);
   assert(tick(wake_chord, 10030, true, false, true) == Event::None);
   tick(wake_chord, 10031, false, false, false);
   assert(tick(wake_chord, 10061, false, false, false) == Event::None);

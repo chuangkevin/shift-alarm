@@ -4,6 +4,7 @@
 namespace buttons {
 
 constexpr uint32_t DEBOUNCE_MS = 30;
+constexpr uint32_t WAKE_HOLD_MS = 250;
 constexpr uint32_t LONG_PRESS_MS = 1200;
 constexpr uint32_t PAIRING_HOLD_MS = 10000;
 
@@ -34,6 +35,8 @@ struct State {
   bool chord_lockout = false;
   bool pairing_sent = false;
   bool wake_sent = false;
+  uint8_t wake_candidate_mask = 0;
+  uint32_t wake_candidate_ms = 0;
   bool ringing_active = false;
   uint8_t previous_raw_mask = 0;
   uint8_t ring_blocked_mask = 0;
@@ -140,7 +143,20 @@ inline Event update(State &state, uint32_t now, bool left, bool center, bool rig
   }
 
   if (!screen_awake) {
-    if (any && !state.wake_sent) {
+    const uint8_t stable_mask = (state.left.stable ? 1 : 0) |
+                                (state.center.stable ? 2 : 0) |
+                                (state.right.stable ? 4 : 0);
+    if (!stable_mask) {
+      state.wake_sent = false;
+      state.wake_candidate_mask = 0;
+      return None;
+    }
+    if (state.wake_candidate_mask != stable_mask) {
+      state.wake_candidate_mask = stable_mask;
+      state.wake_candidate_ms = now;
+      return None;
+    }
+    if (!state.wake_sent && uint32_t(now - state.wake_candidate_ms) >= WAKE_HOLD_MS) {
       state.wake_sent = true;
       state.left.suppressed |= state.left.stable;
       state.center.suppressed |= state.center.stable;
@@ -149,6 +165,7 @@ inline Event update(State &state, uint32_t now, bool left, bool center, bool rig
     }
     return None;
   }
+  state.wake_candidate_mask = 0;
   if (!any) state.wake_sent = false;
 
   if (state.chord_lockout) {
