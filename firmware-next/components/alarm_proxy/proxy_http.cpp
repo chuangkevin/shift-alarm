@@ -45,7 +45,7 @@ bool remote_path(const std::string &target){
  return path.compare(0,8,"/static/")==0||path.compare(0,12,"/api/device/")==0||path=="/api/health"||path=="/api/state"||path=="/api/import"||path=="/api/settings"||path=="/api/months"||path=="/api/qr.svg"||path=="/api/test-alarm";
 }
 bool rewrite_request(const std::string &input, const std::string &lan,
-                     const std::string &backend, Request &out) {
+                     const std::string &backend, Request &out, bool allow_foreign_host) {
     out = Request{};
     if (input.size() > MAX_HEADER || input.size() < 4 || input.substr(input.size()-4) != "\r\n\r\n") return false;
     size_t end = input.find("\r\n");
@@ -60,7 +60,7 @@ bool rewrite_request(const std::string &input, const std::string &lan,
     for (unsigned char c : target) if (c <= 32 || c == 127 || c == '#' || c == '\\') return false;
     std::set<std::string> unique;
     std::vector<std::pair<std::string,std::string>> headers;
-    bool host = false, cl = false;
+    bool host = false, cl = false;out.method=method;out.target=target;
     size_t pos = end+2;
     while (pos < input.size()-2) {
         end = input.find("\r\n", pos);
@@ -73,7 +73,7 @@ bool rewrite_request(const std::string &input, const std::string &lan,
         if (name == "transfer-encoding" || name == "upgrade" || name == "expect") return false;
         if (name == "host" || name == "content-length" || name == "origin" || name == "x-alarm-ui")
             if (!unique.insert(name).second) return false;
-        if (name == "host") { if (value != lan && value != lan+":80") return false; host = true; }
+        if (name == "host") { if (!allow_foreign_host && value != lan && value != lan+":80") return false; out.host=value;host = true; }
         else if (name == "content-length") {
             if (value.empty()) return false;
             uint64_t n=0;
@@ -85,6 +85,7 @@ bool rewrite_request(const std::string &input, const std::string &lan,
         } else if (name == "proxy-connection" || name == "keep-alive" || name == "forwarded" || name.compare(0,12,"x-forwarded-") == 0 || name == "proxy-authorization") {
             // Never allow caller-supplied proxy metadata to affect backend trust.
         } else {
+            if(name=="authorization")out.authorization=value;
             if (name == "origin" && (value == "http://"+lan || value == "http://"+lan+":80")) value="http://"+backend;
             headers.emplace_back(name,value);
         }

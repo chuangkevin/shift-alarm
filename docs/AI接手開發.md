@@ -20,7 +20,7 @@
 
 ## Kevin 與晴晴的獨立裝置（本分支）
 
-`feat/kevin-dual-alarm` 專供第二顆 MAC `fc:01:2c:ca:15:88`：Kevin 與晴晴都固定週一到週五上班，兩人各有「週一、二、三、五」與「週四」兩組時間，每個時間獨立開關。裝置為 0.4.10、Tailnet `100.90.212.116`；遠端入口 `https://morning.sisihome.org`，裝置後端固定為 GN100 `100.127.82.47:8239`，代理到 rpi-matrix 獨立容器 `100.126.226.79:8239`。此分支的裝置權杖、資料庫與 OTA release 目錄都不可與原輪班裝置共用。
+`feat/kevin-dual-alarm` 專供第二顆 MAC `fc:01:2c:ca:15:88`：Kevin 與晴晴都固定週一到週五上班，兩人各有「週一、二、三、五」與「週四」兩組時間，每個時間獨立開關。裝置為 0.4.12、Tailnet `100.90.212.116`；遠端入口 `https://morning.sisihome.org`，裝置後端固定為 GN100 `100.127.82.47:8239`，代理到 rpi-matrix 獨立容器 `100.126.226.79:8239`。此分支的裝置權杖、資料庫與 OTA release 目錄都不可與原輪班裝置共用。
 
 2026-09-17 實機驗證：0.4.6 用 USB 寫入非執行中的 app1，再以 sequence 24 切換，未改 NVS、bootloader 或 partition table；啟動後 Wi-Fi、時鐘、Tailscale、亮度 25%、方向 90°、關屏 5 分鐘均正常。兩人的每週規則已保存，`weeklyProfiles=true`、4 個啟用時段，主畫面分別顯示 Kevin 與晴晴的下一個鬧鐘。「晴」字已加入字型，實體畫面用到的所有非 ASCII 字元由測試與字型表逐一比對；關屏喚醒需穩定按住按鈕 250 ms 以過濾雜訊。0.4.6 將遠端儲存改成有識別碼的等冪工作、750 ms 狀態輪詢、短暫斷線重試與最後讀回比對；實測同一請求從 Tailnet IP 與 `morning.sisihome.org` 各送兩次皆回傳同一工作編號，完成後資料一致。0.4.6 映像已發布到 `shift-alarm-morning/data/releases`，供後續 OTA 使用。
 
@@ -29,6 +29,8 @@
 同日 0.4.9 修正中間鍵喚醒過度嚴格：先全部放開 1 秒後，中間鍵正常按下約 0.1 秒並放開即可亮屏；左右鍵維持 700 ms 門檻。USB 寫入非執行中的 app0、sequence 27，未改 NVS、bootloader 或 partition table；兩人設定與 23 個已啟用鬧鐘保留。0.4.9 已發布，SHA-256 `4a5c00b76bb3079ac4b1583bcf3c15ab5868173ad892e60009417251f0c31879`。
 
 同日 0.4.10 將刺耳方波改為 24 kHz 即時合成的海浪底聲與間歇鳥鳴，峰值由舊方波 5000 限制為 3600，鳥鳴有淡入淡出；`RING_MS=180000` 與任意鍵停止不變。USB 寫入非執行中的 app1、sequence 28，未改 NVS、bootloader 或 partition table；實機透過授權 API 試響後確認開始與停止狀態正確，23 個鬧鐘、Wi-Fi、Tailscale、後端、90°、亮度 25% 與關屏 5 分鐘均保留。0.4.10 已發布，SHA-256 `512d26a7faee0db6de471c522486754e6273a0531624173dfbd5cc59885adf2b`。
+
+同日 0.4.12 修正三個回歸：Tailscale 開機不再固定延遲 30 秒，中鍵 GPIO0 在關屏後以按下邊緣立即喚醒，裝置 AP 的 captive portal 探測可安全轉址到 `http://192.168.4.1/`。GN100 Caddy 在 ESP32 重開或離線時，瀏覽器 HTML 請求會代理 rpi-matrix `/device-offline` 並回 200，不再顯示空白 502；API 仍保留錯誤狀態。沒有啟用鬧鐘時，TFT 不顯示下次日期／時間。USB 寫入非執行中的 app0、sequence 31；實機驗證 Android 與 Apple 探測皆回 302、網域離線頁回 200、裝置恢復後 `/api/status` 為 0.4.12。23 個鬧鐘時間目前全部停用但未刪除，回讀 `alarmCount=0`。OTA SHA-256 `dc8854e2b784544c53c4a3f844531813b39772f82bdcf4057ccba905c0712c2e`。
 
 私有 `provisioning.h` 對這顆專用裝置是權威來源；0.4.1 起，權杖、後端與管理網址不相符時都會覆寫 NVS 並讀回驗證。這是修正換板後仍保留舊 `:8238`／舊網域的根因。不可將此行為或 0.4.x 韌體直接合併給原輪班裝置。
 

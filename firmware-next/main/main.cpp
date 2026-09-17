@@ -410,7 +410,7 @@ void draw() {
     if(portalView<2){
       String text=portalView==0?String("WIFI:T:WPA;S:")+apName+";P:"+apPassword+";;":"http://192.168.4.1";
       qr(text,deviceui::QR_X,deviceui::QR_Y,deviceui::QR_SCALE);
-      line(portalView==0?48:42,deviceui::BOTTOM_TEXT_Y,portalView==0?"右鍵切換 · 掃碼加入":"右鍵切換 · 掃碼設定");
+      line(portalView==0?18:42,deviceui::BOTTOM_TEXT_Y,portalView==0?"掃碼加入 · 自動開啟設定":"右鍵切換 · 掃碼設定");
     }else{
       line(8,54,"無法掃碼時手動加入");line(8,88,String("熱點：")+apName);line(8,116,String("密碼：")+apPassword);line(8,150,"設定頁：192.168.4.1");line(8,184,connecting?"正在連線":setupFailed?"連線失敗，請重試":"右鍵返回條碼");
     }
@@ -424,9 +424,9 @@ void draw() {
     const int64_t kevinNext=clockValid()?weeklyPersonNextEpoch(now,handled,"kevin"):INT64_MAX;
     const int64_t qingqingNext=clockValid()?weeklyPersonNextEpoch(now,handled,"qingqing"):INT64_MAX;
     surface.drawFastHLine(8,96,224,0x31e7);
-    lineColor(8,108,"Kevin",1,0x9d34);line(52,108,kevinNext==INT64_MAX?"尚無":dateWeek(kevinNext));line(184,108,kevinNext==INT64_MAX?"--:--":alarmTime(kevinNext));
-    lineColor(8,137,"晴晴",1,0x9d34);line(52,137,qingqingNext==INT64_MAX?"尚無":dateWeek(qingqingNext));line(184,137,qingqingNext==INT64_MAX?"--:--":alarmTime(qingqingNext));
-    surface.fillRect(8,174,224,34,0x11c5);if(next==INT64_MAX)lineColor(28,180,"尚無下一次鬧鐘",2,0xaf7b);else{char countdown[96];deviceui::countdown(now,next,countdown,sizeof(countdown));lineColor(16,184,countdown,1,0xaf7b);}
+    lineColor(8,108,"Kevin",1,0x9d34);if(kevinNext==INT64_MAX)line(52,108,"未啟用鬧鐘");else{line(52,108,dateWeek(kevinNext));line(184,108,alarmTime(kevinNext));}
+    lineColor(8,137,"晴晴",1,0x9d34);if(qingqingNext==INT64_MAX)line(52,137,"未啟用鬧鐘");else{line(52,137,dateWeek(qingqingNext));line(184,137,alarmTime(qingqingNext));}
+    surface.fillRect(8,174,224,34,0x11c5);if(next==INT64_MAX)lineColor(20,184,"未啟用任何鬧鐘",1,0xaf7b);else{char countdown[96];deviceui::countdown(now,next,countdown,sizeof(countdown));lineColor(16,184,countdown,1,0xaf7b);}
     if(!savedScheduleRestored){surface.fillRect(8,174,224,42,0xf800);line(16,187,"班表讀取失敗，鬧鐘暫停");}
     else if(!clockValid()){surface.fillRect(8,174,224,42,0xf800);line(22,187,"等待校時，鬧鐘暫停");}
     else if(pairingHoldActive){surface.fillRect(8,174,224,34,0x11c5);lineColor(18,184,String("配網倒數 ")+String(buttons::pairingSecondsRemaining(buttonState,millis()))+" 秒",1,0xaf7b);}
@@ -438,7 +438,7 @@ void draw() {
     const int64_t now=time(nullptr),next=clockValid()?nextAlarmEpoch(now):INT64_MAX;alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);int percent=0;uint32_t age=0;const bool valid=battery::value(batteryState,millis(),percent,age);
     if(uiState.page==deviceui::Page::PhoneSetup){line(8,deviceui::TITLE_Y,"手機設定",2);if(WiFi.isConnected()){String url=String("http://")+WiFi.localIP().toString()+"/calendar";qr(url,deviceui::QR_X,deviceui::QR_Y,deviceui::QR_SCALE);line(deviceui::BOTTOM_TEXT_X,deviceui::BOTTOM_TEXT_Y,"掃碼設定班表");}else{line(8,48,"尚未連上無線網路");line(8,76,"按住左右鍵 10 秒");line(8,98,"再依畫面加入裝置熱點");line(8,126,"手機開啟 192.168.4.1");}}
     else if(uiState.page==deviceui::Page::Connectivity){const bool remoteOk=tail.state==ALARM_TAILNET_CONNECTED;const bool backendOk=backendReachableNow(millis());line(8,6,"連線狀態",2);line(8,42,String("目前網路：")+currentWifiSsid());line(8,68,String("已保存 ")+String(unsigned(wifiProfiles.count))+" 組");line(8,94,String("遠端連線：")+(remoteOk?"已連線":"未連線"));line(8,120,String("後端服務：")+(backendOk?"可連線":"無法連線"));lineColor(remoteOk&&backendOk?34:8,154,remoteOk&&backendOk?"遠端與後端連線正常":"連線異常不影響本機鬧鐘",1,remoteOk&&backendOk?0xaf7b:0xf800);}
-    else if(uiState.page==deviceui::Page::Schedule){line(8,6,"鬧鐘資訊",2);if(scheduleStorageFault.load()){line(8,48,"鬧鐘儲存狀態不明");line(8,76,"重開前請勿修改");line(8,108,"目前僅沿用本次開機設定");}else{line(8,44,String("下次上班：")+(next==INT64_MAX?"尚無":dateWeek(next)));line(8,70,String("響鈴時間：")+(next==INT64_MAX?"--:--":alarmTime(next)));line(8,96,String("啟用時段：")+String(unsigned(alarms.size()+weeklyprofiles::enabledCount(weeklyProfiles.as<JsonVariantConst>()))));line(8,122,String("儲存狀態：")+(revision.isEmpty()?"尚未儲存":localSchedule?"本機已儲存":"已同步"));line(8,148,String("版次：")+(revision.isEmpty()?"--":revision.substring(0,18)));}}
+    else if(uiState.page==deviceui::Page::Schedule){line(8,6,"鬧鐘資訊",2);if(scheduleStorageFault.load()){line(8,48,"鬧鐘儲存狀態不明");line(8,76,"重開前請勿修改");line(8,108,"目前僅沿用本次開機設定");}else{if(next==INT64_MAX)line(8,44,"目前未啟用鬧鐘");else{line(8,44,String("下次上班：")+dateWeek(next));line(8,70,String("響鈴時間：")+alarmTime(next));}line(8,96,String("啟用時段：")+String(unsigned(alarms.size()+weeklyprofiles::enabledCount(weeklyProfiles.as<JsonVariantConst>()))));line(8,122,String("儲存狀態：")+(revision.isEmpty()?"尚未儲存":localSchedule?"本機已儲存":"已同步"));line(8,148,String("版次：")+(revision.isEmpty()?"--":revision.substring(0,18)));}}
     else if(uiState.page==deviceui::Page::Device){line(8,6,"裝置資訊",2);line(8,48,String("韌體版本：")+VERSION);line(8,78,String("IP：")+(WiFi.isConnected()?WiFi.localIP().toString():"未連線"));line(8,108,String("電池：")+(valid?String(percent)+"%":"未知"));line(8,134,String("充電：")+(chargingInputValid?(charging.load()?"是":"否"):"未知"));}
     else if(uiState.page==deviceui::Page::Update){alarm_ota_status_t ota={};alarm_ota_get_status(&ota);line(8,deviceui::TITLE_Y,"檢查更新",2);if(WiFi.isConnected()){String url=String("http://")+WiFi.localIP().toString()+"/update";qr(url,deviceui::QR_X,deviceui::QR_Y,deviceui::QR_SCALE);const uint8_t detail=(millis()/2000)%4;if(detail==0)line(66,deviceui::BOTTOM_TEXT_Y,"掃碼開啟更新頁");else if(detail==1)line(66,deviceui::BOTTOM_TEXT_Y,String("目前：")+VERSION);else if(detail==2)line(ota.marker_fault?48:ota.staged_valid?66:72,deviceui::BOTTOM_TEXT_Y,ota.marker_fault?"已下載狀態異常":ota.staged_valid?String("已下載：")+ota.staged.manifest.version:"已下載：沒有");else line(60,deviceui::BOTTOM_TEXT_Y,String("充電：")+(chargingInputValid&&charging.load()?"可以安裝":"尚未就緒"));}else line(8,120,"連上無線網路後顯示條碼");}
     const bool qrPage=WiFi.isConnected()&&(uiState.page==deviceui::Page::PhoneSetup||uiState.page==deviceui::Page::Update);
@@ -918,6 +918,10 @@ bool allowedDeviceHost(const String &host){
   return false;
 }
 extern "C" bool alarm_http_headers_allowed(const char *host,const char *path,const char *method,const char *auth){
+  // Captive-portal probes deliberately use an Internet hostname.  While the
+  // private setup AP is active, allow only their read request through to the
+  // WebServer middleware, which redirects it to the local setup page.
+  if(portal&&(strcmp(method,"GET")==0||strcmp(method,"HEAD")==0))return true;
   if(!allowedDeviceHost(String(host)))return false;
   if(strcmp(method,"POST")==0&&(strcmp(path,"/api/schedule")==0||strcmp(path,"/api/test")==0||strcmp(path,"/api/stop")==0))
     return token.length()&&String(auth)==String("Bearer ")+token;
@@ -928,7 +932,7 @@ void routes() {
   server.on("/clock",HTTP_GET,[]{String page=CLOCK_PAGE;page.replace("NONCE",setupNonce);server.send(200,"text/html; charset=utf-8",devicePage(page));});
   server.on("/schedule",HTTP_GET,[]{server.sendHeader("Location","/calendar");server.send(303,"text/plain","");});
   server.addMiddleware([](WebServer &request,Middleware::Callback next){
-    if(!allowedDeviceHost(request.hostHeader())){request.send(400,"text/plain; charset=utf-8","不接受此主機名稱，請使用裝置畫面上的位址");return true;}
+    if(!allowedDeviceHost(request.hostHeader())){if(portal){request.sendHeader("Location","http://192.168.4.1/");request.send(302,"text/plain; charset=utf-8","正在開啟裝置設定");}else request.send(400,"text/plain; charset=utf-8","不接受此主機名稱，請使用裝置畫面上的位址");return true;}
     request.sendHeader("Cache-Control","no-store");request.sendHeader("X-Frame-Options","DENY");request.sendHeader("Referrer-Policy","no-referrer");
     return next();
   });
@@ -1017,6 +1021,15 @@ void routes() {
     const uint32_t now=millis();cancelWifiSelection(now);startPortal();pendingSsid=candidate.ssid;pendingPassword=candidate.password;wipeString(p);wipeString(s);connecting=true;setupFailed=false;wifiPendingTrial=true;wifiTrialStarted=false;wifiTrialAt=now+wififailover::DISCONNECT_SETTLE_MS;connectStarted=now;apCloseAt=0;
     server.send(202,"application/json","{\"connecting\":true}");
   });
+  auto captiveRedirect=[](){server.sendHeader("Location","http://192.168.4.1/");server.send(302,"text/plain; charset=utf-8","正在開啟裝置設定");};
+  server.on("/generate_204",HTTP_GET,captiveRedirect);
+  server.on("/gen_204",HTTP_GET,captiveRedirect);
+  server.on("/hotspot-detect.html",HTTP_GET,captiveRedirect);
+  server.on("/library/test/success.html",HTTP_GET,captiveRedirect);
+  server.on("/connecttest.txt",HTTP_GET,captiveRedirect);
+  server.on("/ncsi.txt",HTTP_GET,captiveRedirect);
+  server.on("/canonical.html",HTTP_GET,captiveRedirect);
+  server.on("/success.txt",HTTP_GET,captiveRedirect);
   server.onNotFound([]{if(portal){server.sendHeader("Location","http://192.168.4.1/");server.send(302,"text/plain","");}else server.send(404,"text/plain; charset=utf-8","找不到此頁面");}); server.begin();deviceRoutesReady=true;
 }
 void setup() {
@@ -1079,7 +1092,7 @@ void setup() {
 }
 void loop() {
   sampleBattery(millis());
-  if(!tailnetStarted&&WiFi.isConnected()&&clockValid()&&millis()-tailnetAttempt>=30000){tailnetAttempt=millis();if(alarm_tailnet_start(apName.c_str())==ESP_OK)tailnetStarted=true;}
+  if(!tailnetStarted&&WiFi.isConnected()&&clockValid()&&(tailnetAttempt==0||millis()-tailnetAttempt>=30000)){tailnetAttempt=millis();if(alarm_tailnet_start(apName.c_str())==ESP_OK)tailnetStarted=true;}
   if(!proxyStarted){if(alarm_proxy_start()==ESP_OK)proxyStarted=true;}
   refreshOtaGuard();if(otaReady&&!otaBusy.load())alarm_ota_maintenance();
   server.handleClient();if(portal)dns.processNextRequest();uint32_t ms=millis();time_t now=time(nullptr);
@@ -1107,7 +1120,10 @@ void loop() {
     else if(buttons::pairingAllowed(event,ringing)){apCloseAt=0;portalView=0;startPortal();}
     else if(event==buttons::LeftShort&&!portal)deviceui::left(uiState,ms);
     else if(event==buttons::RightShort){if(portal)portalView=(portalView+1)%3;else deviceui::right(uiState,ms);}
-    else if(event==buttons::CenterShort&&!portal)deviceui::center(uiState,ms);
+    else if(event==buttons::CenterShort){
+      if(portal){closePortal();uiState.page=deviceui::Page::Main;}
+      else{deviceui::center(uiState,ms);if(uiState.page==deviceui::Page::PhoneSetup){apCloseAt=0;portalView=0;startPortal();}}
+    }
     if(deviceui::returnIfInactive(uiState,ms))forceDraw=true;
   }
   if(ringing&&millis()-ringStarted>=RING_MS)stopRing(false);

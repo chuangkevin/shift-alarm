@@ -91,9 +91,9 @@ def test_reliability_contract_and_versions_are_wired():
     assert "displaySettingsValid" in source
     assert "settingsLoadValid" in source
     assert "ota_manifest::available" in source
-    assert 'set(PROJECT_VER "0.4.10")' in Path("firmware-next/CMakeLists.txt").read_text()
+    assert 'set(PROJECT_VER "0.4.12")' in Path("firmware-next/CMakeLists.txt").read_text()
     ota_fixture = Path("firmware-next/components/alarm_ota/tests/test_real_component.c").read_text()
-    assert ota_fixture.count('version="0.4.10"') == 2
+    assert ota_fixture.count('version="0.4.12"') == 2
     assert 'version="0.3.12"' not in ota_fixture
     assert "VERSION = '0.1.10'" in Path("app.py").read_text()
 
@@ -116,7 +116,7 @@ def test_shared_page_shell_keeps_markup_before_page_local_style():
     source = Path("firmware-next/main/main.cpp").read_text()
     assert 'content.remove(styleStart,styleEnd+8-styleStart)' in source
     assert 'content=content.substring(styleEnd+8)' not in source
-    assert '尚無下一次鬧鐘' in source
+    assert '未啟用鬧鐘' in source
     assert 'vTaskPrioritySet(nullptr,8)' in source
     assert 'delay(2)' in source
     assert 'deviceui::countdown(now,next' in source
@@ -128,7 +128,10 @@ def test_shared_page_shell_keeps_markup_before_page_local_style():
     assert 'esp_read_mac(staMac,ESP_MAC_WIFI_STA)' in source
     assert 'ESP.getEfuseMac()' not in source
     assert 'server.on("/api/update/download",HTTP_POST' in source
-    assert 'event==buttons::CenterShort&&!portal)deviceui::center' in source
+    assert 'if(uiState.page==deviceui::Page::PhoneSetup){apCloseAt=0;portalView=0;startPortal();}' in source
+    for path in ('/generate_204', '/gen_204', '/hotspot-detect.html', '/connecttest.txt', '/ncsi.txt'):
+        assert f'server.on("{path}",HTTP_GET,captiveRedirect)' in source
+    assert 'if(portal&&(strcmp(method,"GET")==0||strcmp(method,"HEAD")==0))return true' in source
     qr_calls = re.findall(r"\bqr\(([^;]+)\);", source)
     assert len(qr_calls) == 3
     assert all(
@@ -157,6 +160,11 @@ def test_shared_page_shell_keeps_markup_before_page_local_style():
     assert 'weeklyPersonNextEpoch(now,handled,"qingqing")' in main_draw
     assert 'lineColor(8,108,"Kevin"' in main_draw
     assert 'lineColor(8,137,"晴晴"' in main_draw
+    assert main_draw.count('"未啟用鬧鐘"') == 2
+    assert '"未啟用任何鬧鐘"' in main_draw
+    assert 'kevinNext==INT64_MAX?"--:--"' not in main_draw
+    assert 'qingqingNext==INT64_MAX?"--:--"' not in main_draw
+    assert 'tailnetAttempt==0||millis()-tailnetAttempt>=30000' in source
     calendar = Path("firmware-next/main/calendar_page.h").read_text()
     assert "'X-Save-Request':requestId" in calendar
     assert "await pause(750)" in calendar

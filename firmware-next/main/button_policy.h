@@ -5,7 +5,6 @@ namespace buttons {
 
 constexpr uint32_t DEBOUNCE_MS = 30;
 constexpr uint32_t WAKE_ARM_RELEASE_MS = 1000;
-constexpr uint32_t WAKE_CENTER_HOLD_MS = 60;
 constexpr uint32_t WAKE_HOLD_MS = 700;
 constexpr uint32_t LONG_PRESS_MS = 1200;
 constexpr uint32_t PAIRING_HOLD_MS = 10000;
@@ -181,14 +180,24 @@ inline Event update(State &state, uint32_t now, bool left, bool center, bool rig
     }
     state.wake_release_tracking = false;
     if (!state.wake_armed) return None;
+    // GPIO0 is the dedicated middle/BOOT button.  Once all keys have been
+    // released long enough to arm wake-up, its raw press edge is deliberate
+    // and must wake even when the user taps faster than the debounce window.
+    if (rising & 2) {
+      state.wake_sent = true;
+      state.wake_armed = false;
+      state.wake_press_ready = false;
+      state.wake_candidate_mask = 0;
+      state.center.suppressed = true;
+      return Wake;
+    }
     if (state.wake_candidate_mask != stable_mask) {
       state.wake_candidate_mask = stable_mask;
       state.wake_candidate_ms = now;
       return None;
     }
-    const uint32_t wake_hold_ms = stable_mask == 2 ? WAKE_CENTER_HOLD_MS : WAKE_HOLD_MS;
     if (stable_mask && !state.wake_press_ready &&
-        uint32_t(now - state.wake_candidate_ms) >= wake_hold_ms) {
+        uint32_t(now - state.wake_candidate_ms) >= WAKE_HOLD_MS) {
       state.wake_press_ready = true;
       state.left.suppressed |= state.left.stable;
       state.center.suppressed |= state.center.stable;

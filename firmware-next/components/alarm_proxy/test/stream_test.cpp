@@ -1,5 +1,10 @@
 // Runs the actual relay implementation against POSIX sockets/fake upstream.
 // Host shims only replace ESP time, netif discovery, and unused task startup.
+#define ALARM_PROXY_TEST 1
+extern "C" bool alarm_http_headers_allowed(const char *,const char *,const char *method,const char *) {
+    return method&&((method[0]=='G'&&method[1]=='E'&&method[2]=='T'&&!method[3])||
+                   (method[0]=='H'&&method[1]=='E'&&method[2]=='A'&&method[3]=='D'&&!method[4]));
+}
 #include "../alarm_proxy.cpp"
 #include <cassert>
 #include <csignal>

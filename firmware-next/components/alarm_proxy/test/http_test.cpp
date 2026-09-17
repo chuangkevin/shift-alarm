@@ -52,6 +52,8 @@ int main() {
     assert(!parse("GET http://evil/ HTTP/1.1\r\nHost: 192.168.18.55:8080\r\n\r\n",r));
     assert(!parse("GET //evil/ HTTP/1.1\r\nHost: 192.168.18.55:8080\r\n\r\n",r));
     assert(!parse("GET / HTTP/1.1\r\nHost: evil.example\r\n\r\n",r));
+    assert(alarm_proxy::rewrite_request("GET /generate_204 HTTP/1.1\r\nHost: connectivitycheck.gstatic.com\r\n\r\n","192.168.4.1","192.168.4.1",r,true));
+    assert(r.method=="GET"&&r.target=="/generate_204"&&r.host=="connectivitycheck.gstatic.com");
     assert(!parse("GET / HTTP/1.1\nHost: 192.168.18.55:8080\n\n",r));
     assert(!parse(post("Content-Length: 0\r\nBad: a\nb\r\n"),r));
     assert(!parse(post("Content-Length: 0\r\nBad: "+std::string(16384,'a')+"\r\n"),r));

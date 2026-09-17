@@ -15,6 +15,12 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#ifndef ALARM_PROXY_TEST
+extern "C" bool alarm_http_headers_allowed(const char *,const char *,const char *,const char *) __attribute__((weak));
+#else
+extern "C" bool alarm_http_headers_allowed(const char *,const char *,const char *,const char *);
+#endif
+
 namespace {
 constexpr uint16_t LISTEN_PORT=80;
 constexpr unsigned MAX_CLIENTS=2;
@@ -141,8 +147,16 @@ bool relay(Session &s) {
     alarm_proxy::Request request;
     // Validate all framing before choosing a fixed route. Never proxy arbitrary destinations.
     const std::string lan=ip_string(s.local_ip);
-    if(!alarm_proxy::rewrite_request(head.substr(0,boundary),lan,lan,request)) {
-        error_response(s.fd,"400 Bad Request",s);return false;
+    const std::string raw=head.substr(0,boundary);
+    if(!alarm_proxy::rewrite_request(raw,lan,lan,request)) {
+        alarm_proxy::Request captive;
+        auto guard=alarm_http_headers_allowed;
+        if(!alarm_proxy::rewrite_request(raw,lan,lan,captive,true)||!guard||
+           !guard(captive.host.c_str(),captive.target.c_str(),captive.method.c_str(),captive.authorization.c_str())) {
+            error_response(s.fd,"400 Bad Request",s);return false;
+        }
+        const std::string response="HTTP/1.1 302 Found\r\nLocation: http://192.168.4.1/\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
+        return send_all(s.fd,response.data(),response.size(),s);
     }
     size_t first=request.header.find(' '),last=request.header.find(' ',first+1);
     std::string path=request.header.substr(first+1,last-first-1);
