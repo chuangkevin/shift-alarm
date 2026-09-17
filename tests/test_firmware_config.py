@@ -91,9 +91,9 @@ def test_reliability_contract_and_versions_are_wired():
     assert "displaySettingsValid" in source
     assert "settingsLoadValid" in source
     assert "ota_manifest::available" in source
-    assert 'set(PROJECT_VER "0.4.5")' in Path("firmware-next/CMakeLists.txt").read_text()
+    assert 'set(PROJECT_VER "0.4.6")' in Path("firmware-next/CMakeLists.txt").read_text()
     ota_fixture = Path("firmware-next/components/alarm_ota/tests/test_real_component.c").read_text()
-    assert ota_fixture.count('version="0.4.5"') == 2
+    assert ota_fixture.count('version="0.4.6"') == 2
     assert 'version="0.3.12"' not in ota_fixture
     assert "VERSION = '0.1.10'" in Path("app.py").read_text()
 
@@ -157,6 +157,16 @@ def test_shared_page_shell_keeps_markup_before_page_local_style():
     assert 'weeklyPersonNextEpoch(now,handled,"qingqing")' in main_draw
     assert 'lineColor(8,108,"Kevin"' in main_draw
     assert 'lineColor(8,137,"晴晴"' in main_draw
+    calendar = Path("firmware-next/main/calendar_page.h").read_text()
+    assert "'X-Save-Request':requestId" in calendar
+    assert "await pause(750)" in calendar
+    assert "請不要重複按" in calendar
+    assert "JSON.stringify(current.weekly_profiles)!==JSON.stringify(profiles)" in calendar
+    routes = Path("firmware-next/main/local_calendar_routes.h").read_text()
+    assert 'requestId==localSaveRequestId&&localSaveId' in routes
+    assert 'server.header("X-Save-Request")' in routes
+    assert "deserializeJson" not in routes.split('HTTP_POST', 1)[1].split('save-status', 1)[0]
+    assert '"X-Save-Request"' in source
 
 
 def test_tft_font_contains_every_weekday_glyph():
