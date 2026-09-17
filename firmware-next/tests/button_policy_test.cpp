@@ -23,53 +23,23 @@ int main() {
   assert(tick(state, 1360, false, false, false) == Event::CenterLong);
 
   buttons::State wake;
-  tick(wake, 0, false, false, false, false);
-  assert(tick(wake, 999, false, false, false, false) == Event::None);
-  assert(tick(wake, 1000, false, false, false, false) == Event::None);
-  tick(wake, 1001, true, false, false, false);
-  assert(tick(wake, 1031, true, false, false, false) == Event::None);
-  assert(tick(wake, 1730, true, false, false, false) == Event::None);
-  assert(tick(wake, 1731, true, false, false, false) == Event::None);
-  tick(wake, 1732, false, false, false, false);
-  assert(tick(wake, 1762, false, false, false, false) == Event::Wake);
-  assert(tick(wake, 1763, false, false, false, true) == Event::None);
+  tick(wake, 0, true, false, false, false);
+  assert(tick(wake, 30, true, false, false, false) == Event::Wake);
+  tick(wake, 31, false, false, false, true);
+  assert(tick(wake, 61, false, false, false, true) == Event::None);
 
-  // The center GPIO0 button is the normal wake control.  A tap shorter than
-  // debounce wakes immediately on its raw press edge once wake is armed.
+  // Kevin's unit uses the same proven wake rule as the sibling unit: every
+  // physical button wakes after the normal 30 ms debounce interval.
   buttons::State center_wake;
-  tick(center_wake, 0, false, false, false, false);
-  tick(center_wake, 1000, false, false, false, false);
-  assert(tick(center_wake, 1001, false, true, false, false) == Event::Wake);
-  tick(center_wake, 1010, false, false, false, true);
-  assert(tick(center_wake, 1040, false, false, false, true) == Event::None);
-
-  buttons::State wake_noise;
-  tick(wake_noise, 0, false, false, false, false);
-  tick(wake_noise, 1000, false, false, false, false);
-  tick(wake_noise, 1001, true, false, false, false);
-  tick(wake_noise, 1031, true, false, false, false);
-  tick(wake_noise, 1600, false, false, false, false);
-  assert(tick(wake_noise, 1630, false, false, false, false) == Event::None);
-
-  // A key already held when the screen turns off cannot wake it.  It must be
-  // released for a full arming interval before a deliberate press-and-release.
-  buttons::State wake_stuck;
-  tick(wake_stuck, 0, true, false, false, false);
-  tick(wake_stuck, 30, true, false, false, false);
-  assert(tick(wake_stuck, 10000, true, false, false, false) == Event::None);
-  tick(wake_stuck, 10001, false, false, false, false);
-  tick(wake_stuck, 10031, false, false, false, false);
-  assert(tick(wake_stuck, 11031, false, false, false, false) == Event::None);
-  assert(tick(wake_stuck, 11032, false, true, false, false) == Event::Wake);
+  tick(center_wake, 0, false, true, false, false);
+  assert(tick(center_wake, 30, false, true, false, false) == Event::Wake);
+  buttons::State right_wake;
+  tick(right_wake, 0, false, false, true, false);
+  assert(tick(right_wake, 30, false, false, true, false) == Event::Wake);
 
   buttons::State wake_chord;
-  tick(wake_chord, 0, false, false, false, false);
-  tick(wake_chord, 1000, false, false, false, false);
-  tick(wake_chord, 1001, true, false, true, false);
-  tick(wake_chord, 1031, true, false, true, false);
-  tick(wake_chord, 1731, true, false, true, false);
-  tick(wake_chord, 1732, false, false, false, false);
-  assert(tick(wake_chord, 1762, false, false, false, false) == Event::Wake);
+  tick(wake_chord, 0, true, false, true, false);
+  assert(tick(wake_chord, 30, true, false, true, false) == Event::Wake);
   assert(tick(wake_chord, 10030, true, false, true) == Event::None);
   tick(wake_chord, 10031, false, false, false);
   assert(tick(wake_chord, 10061, false, false, false) == Event::None);
