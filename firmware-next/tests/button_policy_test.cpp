@@ -23,23 +23,48 @@ int main() {
   assert(tick(state, 1360, false, false, false) == Event::CenterLong);
 
   buttons::State wake;
-  tick(wake, 0, true, false, false, false);
-  assert(tick(wake, 30, true, false, false, false) == Event::None);
-  assert(tick(wake, 279, true, false, false, false) == Event::None);
-  assert(tick(wake, 280, true, false, false, false) == Event::Wake);
-  tick(wake, 281, false, false, false, true);
-  assert(tick(wake, 311, false, false, false, true) == Event::None);
+  tick(wake, 0, false, false, false, false);
+  assert(tick(wake, 999, false, false, false, false) == Event::None);
+  assert(tick(wake, 1000, false, false, false, false) == Event::None);
+  tick(wake, 1001, true, false, false, false);
+  assert(tick(wake, 1031, true, false, false, false) == Event::None);
+  assert(tick(wake, 1730, true, false, false, false) == Event::None);
+  assert(tick(wake, 1731, true, false, false, false) == Event::None);
+  tick(wake, 1732, false, false, false, false);
+  assert(tick(wake, 1762, false, false, false, false) == Event::Wake);
+  assert(tick(wake, 1763, false, false, false, true) == Event::None);
 
   buttons::State wake_noise;
-  tick(wake_noise, 0, true, false, false, false);
-  tick(wake_noise, 30, true, false, false, false);
-  tick(wake_noise, 120, false, false, false, false);
-  assert(tick(wake_noise, 150, false, false, false, false) == Event::None);
+  tick(wake_noise, 0, false, false, false, false);
+  tick(wake_noise, 1000, false, false, false, false);
+  tick(wake_noise, 1001, true, false, false, false);
+  tick(wake_noise, 1031, true, false, false, false);
+  tick(wake_noise, 1600, false, false, false, false);
+  assert(tick(wake_noise, 1630, false, false, false, false) == Event::None);
+
+  // A key already held when the screen turns off cannot wake it.  It must be
+  // released for a full arming interval before a deliberate press-and-release.
+  buttons::State wake_stuck;
+  tick(wake_stuck, 0, true, false, false, false);
+  tick(wake_stuck, 30, true, false, false, false);
+  assert(tick(wake_stuck, 10000, true, false, false, false) == Event::None);
+  tick(wake_stuck, 10001, false, false, false, false);
+  tick(wake_stuck, 10031, false, false, false, false);
+  assert(tick(wake_stuck, 11031, false, false, false, false) == Event::None);
+  tick(wake_stuck, 11032, false, true, false, false);
+  tick(wake_stuck, 11062, false, true, false, false);
+  tick(wake_stuck, 11762, false, true, false, false);
+  tick(wake_stuck, 11763, false, false, false, false);
+  assert(tick(wake_stuck, 11793, false, false, false, false) == Event::Wake);
 
   buttons::State wake_chord;
-  tick(wake_chord, 0, true, false, true, false);
-  assert(tick(wake_chord, 30, true, false, true, false) == Event::None);
-  assert(tick(wake_chord, 280, true, false, true, false) == Event::Wake);
+  tick(wake_chord, 0, false, false, false, false);
+  tick(wake_chord, 1000, false, false, false, false);
+  tick(wake_chord, 1001, true, false, true, false);
+  tick(wake_chord, 1031, true, false, true, false);
+  tick(wake_chord, 1731, true, false, true, false);
+  tick(wake_chord, 1732, false, false, false, false);
+  assert(tick(wake_chord, 1762, false, false, false, false) == Event::Wake);
   assert(tick(wake_chord, 10030, true, false, true) == Event::None);
   tick(wake_chord, 10031, false, false, false);
   assert(tick(wake_chord, 10061, false, false, false) == Event::None);

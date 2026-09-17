@@ -553,10 +553,18 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
 
     /* Peer maps are session-scoped; only device identity is persisted. */
 
+    /* When a priority service peer is configured, this appliance only needs
+     * active discovery for that peer. Advertising/probing every node in a
+     * large tailnet creates a constant stream of DISCO replies and one-shot
+     * WireGuard handshakes which can starve the embedded HTTP server. Other
+     * peers remain installed and can still initiate a session themselves. */
+    const bool actively_managed = ml->config.priority_peer_ip == 0 ||
+                                  p->vpn_ip == ml->config.priority_peer_ip;
+
     /* Send CallMeMaybe to trigger peer-initiated handshake (NAT traversal).
      * Skip on cellular: our endpoints are behind carrier-grade NAT and
      * unreachable — all traffic goes through DERP relay. */
-    if (!ml_at_socket_is_ready()) {
+    if (actively_managed && !ml_at_socket_is_ready()) {
         disco_send_call_me_maybe(ml, idx);
     }
 
@@ -565,7 +573,7 @@ static int add_peer(microlink_t *ml, const ml_peer_update_t *update) {
      * the periodic probe (every 15s) will handle the rest.
      * Skip on cellular: direct probes fill DERP TX queue (~0.6s each on AT socket),
      * blocking time-critical WG handshake responses. */
-    if (!ml_at_socket_is_ready()) {
+    if (actively_managed && !ml_at_socket_is_ready()) {
         static uint64_t last_burst_ms = 0;
         static int burst_count = 0;
         uint64_t add_now = ml_get_time_ms();
@@ -1442,6 +1450,14 @@ static void disco_periodic_probes(microlink_t *ml) {
         int i = (start + n) % ml->peer_count;
         ml_peer_t *p = &ml->peers[i];
         if (!p->active) continue;
+
+        /* A configured priority peer is the appliance's service gateway.
+         * Keep its NAT path warm without continuously probing and handshaking
+         * with every unrelated device in the user's tailnet. */
+        if (ml->config.priority_peer_ip != 0 &&
+            p->vpn_ip != ml->config.priority_peer_ip) {
+            continue;
+        }
 
         /* Peer allowlist filter: check early so we can skip expensive work.
          * Inbound DISCO pings from any peer are still answered (don't break remote). */

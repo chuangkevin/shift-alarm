@@ -4,7 +4,8 @@
 namespace buttons {
 
 constexpr uint32_t DEBOUNCE_MS = 30;
-constexpr uint32_t WAKE_HOLD_MS = 250;
+constexpr uint32_t WAKE_ARM_RELEASE_MS = 1000;
+constexpr uint32_t WAKE_HOLD_MS = 700;
 constexpr uint32_t LONG_PRESS_MS = 1200;
 constexpr uint32_t PAIRING_HOLD_MS = 10000;
 
@@ -35,8 +36,13 @@ struct State {
   bool chord_lockout = false;
   bool pairing_sent = false;
   bool wake_sent = false;
+  bool screen_was_awake = true;
+  bool wake_armed = false;
+  bool wake_release_tracking = false;
+  bool wake_press_ready = false;
   uint8_t wake_candidate_mask = 0;
   uint32_t wake_candidate_ms = 0;
+  uint32_t wake_release_ms = 0;
   bool ringing_active = false;
   uint8_t previous_raw_mask = 0;
   uint8_t ring_blocked_mask = 0;
@@ -146,25 +152,52 @@ inline Event update(State &state, uint32_t now, bool left, bool center, bool rig
     const uint8_t stable_mask = (state.left.stable ? 1 : 0) |
                                 (state.center.stable ? 2 : 0) |
                                 (state.right.stable ? 4 : 0);
-    if (!stable_mask) {
+    if (state.screen_was_awake) {
+      state.screen_was_awake = false;
       state.wake_sent = false;
+      state.wake_armed = false;
+      state.wake_release_tracking = false;
+      state.wake_press_ready = false;
+      state.wake_candidate_mask = 0;
+    }
+    if (!raw_mask && !stable_mask) {
+      if (state.wake_press_ready) {
+        state.wake_sent = true;
+        state.wake_armed = false;
+        state.wake_press_ready = false;
+        state.wake_release_tracking = false;
+        state.wake_candidate_mask = 0;
+        return Wake;
+      }
+      if (!state.wake_release_tracking) {
+        state.wake_release_tracking = true;
+        state.wake_release_ms = now;
+      } else if (uint32_t(now - state.wake_release_ms) >= WAKE_ARM_RELEASE_MS) {
+        state.wake_armed = true;
+      }
       state.wake_candidate_mask = 0;
       return None;
     }
+    state.wake_release_tracking = false;
+    if (!state.wake_armed) return None;
     if (state.wake_candidate_mask != stable_mask) {
       state.wake_candidate_mask = stable_mask;
       state.wake_candidate_ms = now;
       return None;
     }
-    if (!state.wake_sent && uint32_t(now - state.wake_candidate_ms) >= WAKE_HOLD_MS) {
-      state.wake_sent = true;
+    if (stable_mask && !state.wake_press_ready &&
+        uint32_t(now - state.wake_candidate_ms) >= WAKE_HOLD_MS) {
+      state.wake_press_ready = true;
       state.left.suppressed |= state.left.stable;
       state.center.suppressed |= state.center.stable;
       state.right.suppressed |= state.right.stable;
-      return Wake;
     }
     return None;
   }
+  state.screen_was_awake = true;
+  state.wake_armed = false;
+  state.wake_release_tracking = false;
+  state.wake_press_ready = false;
   state.wake_candidate_mask = 0;
   if (!any) state.wake_sent = false;
 

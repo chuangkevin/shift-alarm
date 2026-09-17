@@ -20,9 +20,11 @@
 
 ## Kevin 與晴晴的獨立裝置（本分支）
 
-`feat/kevin-dual-alarm` 專供第二顆 MAC `fc:01:2c:ca:15:88`：Kevin 與晴晴都固定週一到週五上班，兩人各有「週一、二、三、五」與「週四」兩組時間，每個時間獨立開關。裝置為 0.4.6、Tailnet `100.90.212.116`；遠端入口 `https://morning.sisihome.org`，裝置後端固定為 GN100 `100.127.82.47:8239`，代理到 rpi-matrix 獨立容器 `100.126.226.79:8239`。此分支的裝置權杖、資料庫與 OTA release 目錄都不可與原輪班裝置共用。
+`feat/kevin-dual-alarm` 專供第二顆 MAC `fc:01:2c:ca:15:88`：Kevin 與晴晴都固定週一到週五上班，兩人各有「週一、二、三、五」與「週四」兩組時間，每個時間獨立開關。裝置為 0.4.8、Tailnet `100.90.212.116`；遠端入口 `https://morning.sisihome.org`，裝置後端固定為 GN100 `100.127.82.47:8239`，代理到 rpi-matrix 獨立容器 `100.126.226.79:8239`。此分支的裝置權杖、資料庫與 OTA release 目錄都不可與原輪班裝置共用。
 
 2026-09-17 實機驗證：0.4.6 用 USB 寫入非執行中的 app1，再以 sequence 24 切換，未改 NVS、bootloader 或 partition table；啟動後 Wi-Fi、時鐘、Tailscale、亮度 25%、方向 90°、關屏 5 分鐘均正常。兩人的每週規則已保存，`weeklyProfiles=true`、4 個啟用時段，主畫面分別顯示 Kevin 與晴晴的下一個鬧鐘。「晴」字已加入字型，實體畫面用到的所有非 ASCII 字元由測試與字型表逐一比對；關屏喚醒需穩定按住按鈕 250 ms 以過濾雜訊。0.4.6 將遠端儲存改成有識別碼的等冪工作、750 ms 狀態輪詢、短暫斷線重試與最後讀回比對；實測同一請求從 Tailnet IP 與 `morning.sisihome.org` 各送兩次皆回傳同一工作編號，完成後資料一致。0.4.6 映像已發布到 `shift-alarm-morning/data/releases`，供後續 OTA 使用。
+
+2026-09-18 實機驗證：0.4.8 寫入非執行中的 app1，sequence 26，未改 NVS、bootloader 或 partition table。關屏喚醒改成「全部放開 1 秒 → 穩定按住 700 ms → 放開」，以隔離按鍵雜訊與卡鍵；1 分鐘測試設定到期後 `screenAwake=false`。MicroLink 只主動維持 priority peer GN100 `100.127.82.47`，不再週期探測整個約 60 節點的 Tailnet；其他節點仍可主動連入。實測 12 次連續遠端狀態請求全部回 200（約 0.13–0.91 秒），網域 `/calendar` 回 200。韌體的 `RING_MS=180000`，鬧鐘滿 3 分鐘會自動停止。0.4.8 映像摘要 `15e15f098dabb0b81ca4b280d7f3a35e64e0d775d5ec7559375a006f491d4f29` 已發布到獨立 `shift-alarm-morning/data/releases`。
 
 私有 `provisioning.h` 對這顆專用裝置是權威來源；0.4.1 起，權杖、後端與管理網址不相符時都會覆寫 NVS 並讀回驗證。這是修正換板後仍保留舊 `:8238`／舊網域的根因。不可將此行為或 0.4.x 韌體直接合併給原輪班裝置。
 
