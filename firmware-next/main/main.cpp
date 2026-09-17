@@ -61,6 +61,7 @@ void networkClockSynced(struct timeval *tv){lastNetworkClock=uint32_t(tv->tv_sec
 constexpr int BUTTON_STOP=0, BUTTON_SNOOZE=39, BUTTON_TEST=40;
 using Alarm=schedulecandidate::Alarm;
 std::vector<Alarm> alarms;
+JsonDocument calendarMonths,weeklyProfiles;
 Preferences prefs;
 WebServer server(IPAddress(127,0,0,1),8081);
 DNSServer dns;
@@ -332,9 +333,32 @@ void qr(const String &text,int x,int y,int scale){
     if(qrcode_getModule(&code,col,row))surface.fillRect(x+col*scale,y+row*scale,scale,scale,0);
 #endif
 }
+bool weeklyConfigured(){return weeklyprofiles::valid(weeklyProfiles.as<JsonVariantConst>());}
+String weeklyPersonName(const char *key){return strcmp(key,"kevin")==0?"Kevin":"晴晴";}
+void weeklyOccurrence(int64_t now,bool dueOnly,int64_t handledEpoch,int64_t &best,String &label){
+ if(!weeklyConfigured())return;
+ time_t base=now;tm today={};localtime_r(&base,&today);
+ const int firstDelta=dueOnly?0:0,lastDelta=dueOnly?0:7;
+ for(int delta=firstDelta;delta<=lastDelta;delta++){
+  tm date=today;date.tm_mday+=delta;date.tm_hour=12;date.tm_min=0;date.tm_sec=0;time_t noon=mktime(&date);localtime_r(&noon,&date);
+  const char *group=date.tm_wday==4?"thursday":(date.tm_wday>=1&&date.tm_wday<=5?"regular":nullptr);if(!group)continue;
+  for(const char *person:{"kevin","qingqing"}){
+   String timesKey=String(group)+"_times",disabledKey=String("disabled_")+group+"_times";std::set<String> disabled;
+   for(JsonVariantConst item:weeklyProfiles[person][disabledKey].as<JsonArrayConst>())disabled.insert(item.as<String>());
+   for(JsonVariantConst item:weeklyProfiles[person][timesKey].as<JsonArrayConst>()){
+    String text=item.as<String>();if(disabled.count(text))continue;int hour,minute;if(!localcalendar::time(text.c_str(),hour,minute))continue;
+    tm candidate=date;candidate.tm_hour=hour;candidate.tm_min=minute;candidate.tm_sec=0;int64_t epoch=mktime(&candidate);
+    const bool match=dueOnly?alarmclock::due(epoch,now,handledEpoch):alarmclock::upcoming(epoch,now,handledEpoch);if(!match)continue;
+    if(epoch<best){best=epoch;label=weeklyPersonName(person)+" 上班鬧鐘";}
+    else if(epoch==best&&!label.startsWith(weeklyPersonName(person))){const String suffix=" 上班鬧鐘";if(label.endsWith(suffix))label.remove(label.length()-suffix.length());label+="、"+weeklyPersonName(person)+suffix;}
+   }
+  }
+ }
+}
 int64_t nextAlarmEpoch(int64_t now){
   int64_t next=INT64_MAX;
   for(auto &alarm:alarms)if(alarmclock::upcoming(alarm.epoch,now,handled)&&alarm.epoch<next)next=alarm.epoch;
+  String ignored;weeklyOccurrence(now,false,handled,next,ignored);
   return next;
 }
 String weekday(const tm &value){static const char *days[]={"日","一","二","三","四","五","六"};return days[value.tm_wday];}
@@ -388,13 +412,13 @@ void draw() {
     else if(pairingHoldActive){surface.fillRect(8,174,224,34,0x11c5);lineColor(18,184,String("配網倒數 ")+String(buttons::pairingSecondsRemaining(buttonState,millis()))+" 秒",1,0xaf7b);}
     lineColor(36,220,"左右鍵查看資訊 · 中鍵進入",1,0x8410);
   } else if(uiState.page==deviceui::Page::Menu){
-    static const char *items[]={"手機設定","連線狀態","班表資訊","裝置資訊","檢查更新","返回主畫面"};line(8,6,"更多資訊",2);
+    static const char *items[]={"手機設定","連線狀態","鬧鐘資訊","裝置資訊","檢查更新","返回主畫面"};line(8,6,"更多資訊",2);
     for(uint8_t i=0;i<deviceui::MENU_ITEM_COUNT;i++){const int y=38+i*30;if(i==uiState.selection){surface.fillRect(6,y-3,228,27,0xaf7b);lineColor(18,y,String("> ")+items[i],1,0x1103);}else{surface.drawRect(6,y-3,228,27,0x31e7);line(18,y,String("  ")+items[i]);}}
   } else {
     const int64_t now=time(nullptr),next=clockValid()?nextAlarmEpoch(now):INT64_MAX;alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);int percent=0;uint32_t age=0;const bool valid=battery::value(batteryState,millis(),percent,age);
     if(uiState.page==deviceui::Page::PhoneSetup){line(8,deviceui::TITLE_Y,"手機設定",2);if(WiFi.isConnected()){String url=String("http://")+WiFi.localIP().toString()+"/calendar";qr(url,deviceui::QR_X,deviceui::QR_Y,deviceui::QR_SCALE);line(deviceui::BOTTOM_TEXT_X,deviceui::BOTTOM_TEXT_Y,"掃碼設定班表");}else{line(8,48,"尚未連上無線網路");line(8,76,"按住左右鍵 10 秒");line(8,98,"再依畫面加入裝置熱點");line(8,126,"手機開啟 192.168.4.1");}}
     else if(uiState.page==deviceui::Page::Connectivity){const bool remoteOk=tail.state==ALARM_TAILNET_CONNECTED;const bool backendOk=backendReachableNow(millis());line(8,6,"連線狀態",2);line(8,42,String("目前網路：")+currentWifiSsid());line(8,68,String("已保存 ")+String(unsigned(wifiProfiles.count))+" 組");line(8,94,String("遠端連線：")+(remoteOk?"已連線":"未連線"));line(8,120,String("後端服務：")+(backendOk?"可連線":"無法連線"));lineColor(remoteOk&&backendOk?34:8,154,remoteOk&&backendOk?"遠端與後端連線正常":"連線異常不影響本機鬧鐘",1,remoteOk&&backendOk?0xaf7b:0xf800);}
-    else if(uiState.page==deviceui::Page::Schedule){line(8,6,"班表資訊",2);if(scheduleStorageFault.load()){line(8,48,"班表儲存狀態不明");line(8,76,"重開前請勿修改");line(8,108,"目前僅沿用本次開機班表");}else{line(8,44,String("下次上班：")+(next==INT64_MAX?"尚無":dateWeek(next)));line(8,70,String("響鈴時間：")+(next==INT64_MAX?"--:--":alarmTime(next)));line(8,96,String("鬧鐘數量：")+String(unsigned(alarms.size())));line(8,122,String("儲存狀態：")+(revision.isEmpty()?"尚未儲存":localSchedule?"本機已儲存":"已同步"));line(8,148,String("版次：")+(revision.isEmpty()?"--":revision.substring(0,18)));}}
+    else if(uiState.page==deviceui::Page::Schedule){line(8,6,"鬧鐘資訊",2);if(scheduleStorageFault.load()){line(8,48,"鬧鐘儲存狀態不明");line(8,76,"重開前請勿修改");line(8,108,"目前僅沿用本次開機設定");}else{line(8,44,String("下次上班：")+(next==INT64_MAX?"尚無":dateWeek(next)));line(8,70,String("響鈴時間：")+(next==INT64_MAX?"--:--":alarmTime(next)));line(8,96,String("啟用時段：")+String(unsigned(alarms.size()+weeklyprofiles::enabledCount(weeklyProfiles.as<JsonVariantConst>()))));line(8,122,String("儲存狀態：")+(revision.isEmpty()?"尚未儲存":localSchedule?"本機已儲存":"已同步"));line(8,148,String("版次：")+(revision.isEmpty()?"--":revision.substring(0,18)));}}
     else if(uiState.page==deviceui::Page::Device){line(8,6,"裝置資訊",2);line(8,48,String("韌體版本：")+VERSION);line(8,78,String("IP：")+(WiFi.isConnected()?WiFi.localIP().toString():"未連線"));line(8,108,String("電池：")+(valid?String(percent)+"%":"未知"));line(8,134,String("充電：")+(chargingInputValid?(charging.load()?"是":"否"):"未知"));}
     else if(uiState.page==deviceui::Page::Update){alarm_ota_status_t ota={};alarm_ota_get_status(&ota);line(8,deviceui::TITLE_Y,"檢查更新",2);if(WiFi.isConnected()){String url=String("http://")+WiFi.localIP().toString()+"/update";qr(url,deviceui::QR_X,deviceui::QR_Y,deviceui::QR_SCALE);const uint8_t detail=(millis()/2000)%4;if(detail==0)line(66,deviceui::BOTTOM_TEXT_Y,"掃碼開啟更新頁");else if(detail==1)line(66,deviceui::BOTTOM_TEXT_Y,String("目前：")+VERSION);else if(detail==2)line(ota.marker_fault?48:ota.staged_valid?66:72,deviceui::BOTTOM_TEXT_Y,ota.marker_fault?"已下載狀態異常":ota.staged_valid?String("已下載：")+ota.staged.manifest.version:"已下載：沒有");else line(60,deviceui::BOTTOM_TEXT_Y,String("充電：")+(chargingInputValid&&charging.load()?"可以安裝":"尚未就緒"));}else line(8,120,"連上無線網路後顯示條碼");}
     const bool qrPage=WiFi.isConnected()&&(uiState.page==deviceui::Page::PhoneSetup||uiState.page==deviceui::Page::Update);
@@ -426,9 +450,8 @@ void closePortal(){if(!portal)return;portal=false;apCloseAt=0;dns.stop();WiFi.so
 void startRing(String label) { ringLabel=label;ringStarted=millis();if(!ringing){closePortal();uiState.page=deviceui::Page::Main;buttons::beginRinging(buttonState,ringStarted,!digitalRead(BUTTON_SNOOZE),!digitalRead(BUTTON_STOP),!digitalRead(BUTTON_TEST));}ringing=true;wakeScreen();forceDraw=true;Serial.println("ALARM_RING_STARTED"); }
 void stopRing(bool doSnooze) { ringing=false;buttons::endRinging(buttonState);snooze=doSnooze&&clockValid()?time(nullptr)+alarmclock::SNOOZE_SECONDS:0;prefs.putLong64("snooze",snooze);forceDraw=true;Serial.println(doSnooze?"ALARM_SNOOZED":"ALARM_STOPPED"); }
 #include "calendar_metadata.h"
-JsonDocument calendarMonths;
 void applyScheduleCandidate(schedulecandidate::Candidate &candidate,bool sideEffects=true){
-  alarms.swap(candidate.alarms);swap(calendarMonths,candidate.months);revision=std::move(candidate.revision);localSchedule=candidate.local;firstConsecutiveOnly=candidate.first_only;forceDraw=true;
+  alarms.swap(candidate.alarms);swap(calendarMonths,candidate.months);swap(weeklyProfiles,candidate.weekly_profiles);revision=std::move(candidate.revision);localSchedule=candidate.local;firstConsecutiveOnly=candidate.first_only;forceDraw=true;
   ++scheduleGeneration;
   backendpoll::invalidate(backendPollState);
   if(!sideEffects)return;
@@ -448,7 +471,14 @@ bool scheduleNvsWriteExact(const String &value){
 bool scheduleFaultMarker(bool write){nvs_handle_t handle;if(nvs_open_from_partition("alarm_nvs","shift-alarm",write?NVS_READWRITE:NVS_READONLY,&handle)!=ESP_OK)return write?false:true;uint8_t value=0;esp_err_t err;if(write){err=nvs_set_u8(handle,"schedule-fault-v1",1);if(err==ESP_OK)err=nvs_commit(handle);if(err==ESP_OK)err=nvs_get_u8(handle,"schedule-fault-v1",&value);}else err=nvs_get_u8(handle,"schedule-fault-v1",&value);nvs_close(handle);return write?err==ESP_OK&&value==1:err==ESP_OK&&value==1;}
 void latchScheduleStorageFault(){scheduleStorageFault.store(true);scheduleFaultMarker(true);}
 bool buildLocalSchedule(const String &base,const String &patch,schedulecandidate::Candidate &candidate,String &error){
-  schedulecandidate::Candidate current;if(!base.isEmpty()&&!schedulecandidate::parse(base,current,error))return false;JsonDocument input;int year,month;if(deserializeJson(input,patch)){error="班表資料格式無效";return false;}auto first=input["first_consecutive_only"];
+  schedulecandidate::Candidate current;if(!base.isEmpty()&&!schedulecandidate::parse(base,current,error))return false;JsonDocument input;int year,month;if(deserializeJson(input,patch)){error="班表資料格式無效";return false;}
+  if(input.as<JsonObjectConst>().containsKey("weekly_profiles")){
+    if(!weeklyprofiles::valid(input["weekly_profiles"])){error="Kevin 與晴晴的每週鬧鐘設定無效";return false;}
+    JsonDocument next;next["revision"]=String("local-")+String(esp_random(),HEX)+String(esp_random(),HEX);next["timezone"]="Asia/Taipei";next["source"]="local";next["first_consecutive_only"]=false;next["months"].to<JsonObject>();next["weekly_profiles"]=input["weekly_profiles"];
+    auto list=next["alarms"].to<JsonArray>();for(const auto &alarm:current.alarms)if(alarm.id.startsWith("test-")){auto saved=list.add<JsonObject>();saved["id"]=alarm.id;saved["label"]=alarm.label;saved["epoch"]=alarm.epoch;}
+    if(next.overflowed()){error="每週鬧鐘設定記憶體不足，原設定未變更";return false;}String full;serializeJson(next,full);return schedulecandidate::parse(full,candidate,error);
+  }
+  auto first=input["first_consecutive_only"];
   if(!input["month"].is<String>()||!localcalendar::month(input["month"].as<String>().c_str(),year,month)||!input["days"].is<JsonArray>()||!input["times"].is<JsonArray>()||(!input["disabled_times"].isNull()&&!input["disabled_times"].is<JsonArray>())||input["days"].size()>31||(input["days"].size()&&!input["times"].size())||input["times"].size()>8||input["disabled_times"].size()>8||(!first.isNull()&&!first.is<bool>())){error="請選擇有效月份、日期、鬧鐘時間及通知方式";return false;}
   std::vector<int> days;std::vector<String> times;std::set<String> disabled;for(JsonVariant v:input["days"].as<JsonArray>()){if(!v.is<int>()||v.as<int>()<1||v.as<int>()>localcalendar::days(year,month)||std::find(days.begin(),days.end(),v.as<int>())!=days.end()){error="上班日期無效或重複";return false;}days.push_back(v.as<int>());}for(JsonVariant v:input["times"].as<JsonArray>()){int h,m;String at=v.as<String>();if(!v.is<String>()||!localcalendar::time(at.c_str(),h,m)||std::find(times.begin(),times.end(),at)!=times.end()){error="鬧鐘時間無效或重複，請使用 07:00 格式";return false;}times.push_back(at);}for(JsonVariant v:input["disabled_times"].as<JsonArray>()){String at=v.as<String>();if(!v.is<String>()||std::find(times.begin(),times.end(),at)==times.end()||!disabled.insert(at).second){error="停用的鬧鐘時間無效或重複";return false;}}
   const bool firstOnly=first.is<bool>()?first.as<bool>():current.first_only;JsonDocument next;next["revision"]=String("local-")+String(esp_random(),HEX)+String(esp_random(),HEX);next["timezone"]="Asia/Taipei";next["source"]="local";next["first_consecutive_only"]=firstOnly;auto list=next["alarms"].to<JsonArray>();next["months"]=current.months;String monthKey=input["month"].as<String>();auto metadata=next["months"][monthKey].to<JsonObject>();metadata["days"]=input["days"];metadata["times"]=input["times"];auto disabledMeta=metadata["disabled_times"].to<JsonArray>();for(const auto &at:disabled)disabledMeta.add(at);if(!localcalendar::validMonths(next["months"])){error="月份設定格式無效或超過 120 個月";return false;}
@@ -457,7 +487,7 @@ bool buildLocalSchedule(const String &base,const String &patch,schedulecandidate
   for(JsonPairConst entry:next["months"].as<JsonObjectConst>()){int y,m;localcalendar::month(entry.key().c_str(),y,m);std::set<String> off;for(JsonVariantConst at:entry.value()["disabled_times"].as<JsonArrayConst>())off.insert(at.as<String>());for(JsonVariantConst day:entry.value()["days"].as<JsonArrayConst>()){int selected=day.as<int>();int64_t work=localcalendar::epoch(y,m,selected,0,0);if(!localcalendar::shouldNotify(work,known,firstOnly))continue;for(JsonVariantConst av:entry.value()["times"].as<JsonArrayConst>()){String at=av.as<String>();if(off.count(at))continue;if(list.size()>=MAX_ALARMS){error="已超過裝置可儲存的 512 個鬧鐘，請先清除不需要的月份";return false;}int h,min;localcalendar::time(at.c_str(),h,min);auto alarm=list.add<JsonObject>();alarm["id"]=String("local-")+entry.key().c_str()+"-"+selected+"-"+at;alarm["label"]="上班鬧鐘";alarm["epoch"]=localcalendar::epoch(y,m,selected,h,min);}}}
   if(next.overflowed()){error="班表設定記憶體不足，原設定未變更";return false;}String full;serializeJson(next,full);return schedulecandidate::parse(full,candidate,error);
 }
-void wipeScheduleWork(ScheduleWork *work){if(!work)return;wipeString(work->input);wipeString(work->previous);for(auto &alarm:work->candidate.alarms){wipeString(alarm.id);wipeString(alarm.label);}work->candidate.alarms.clear();work->candidate.months.clear();wipeString(work->candidate.revision);wipeString(work->candidate.canonical);wipeString(work->candidate.management_url);wipeString(work->candidate.command_id);delete work;}
+void wipeScheduleWork(ScheduleWork *work){if(!work)return;wipeString(work->input);wipeString(work->previous);for(auto &alarm:work->candidate.alarms){wipeString(alarm.id);wipeString(alarm.label);}work->candidate.alarms.clear();work->candidate.months.clear();work->candidate.weekly_profiles.clear();wipeString(work->candidate.revision);wipeString(work->candidate.canonical);wipeString(work->candidate.management_url);wipeString(work->candidate.command_id);delete work;}
 void scheduleWorker(void*){for(;;){ScheduleWork *work=nullptr;if(xQueueReceive(scheduleRequestQueue,&work,portMAX_DELAY)!=pdTRUE||!work)continue;if(work->origin==ScheduleOrigin::Cleanup){wipeScheduleWork(work);continue;}if(work->origin==ScheduleOrigin::Rollback){work->persisted=scheduleNvsWriteExact(work->previous);if(!work->persisted)latchScheduleStorageFault();}else if(!scheduleNvsRead(work->previous))work->error="無法讀取既有班表";else if(work->origin==ScheduleOrigin::Local?!buildLocalSchedule(work->previous,work->input,work->candidate,work->error):!schedulecandidate::parse(work->input,work->candidate,work->error)){}else{work->persisted=scheduleNvsWriteExact(work->candidate.canonical);if(!work->persisted&&!scheduleNvsWriteExact(work->previous)){work->error="班表儲存狀態不明；重開前請勿修改";latchScheduleStorageFault();}}if(!work->persisted&&work->error.isEmpty())work->error="班表儲存失敗；未變更執行中班表";wipeString(work->input);if(xQueueSend(scheduleResultQueue,&work,0)!=pdTRUE){if(work->persisted&&work->origin!=ScheduleOrigin::Rollback&&!scheduleNvsWriteExact(work->previous))latchScheduleStorageFault();scheduleDroppedId.store(work->id);wipeScheduleWork(work);}}}
 bool initScheduleWorker(){scheduleRequestQueue=xQueueCreate(1,sizeof(ScheduleWork*));scheduleResultQueue=xQueueCreate(1,sizeof(ScheduleWork*));if(!scheduleRequestQueue||!scheduleResultQueue){if(scheduleRequestQueue)vQueueDelete(scheduleRequestQueue);if(scheduleResultQueue)vQueueDelete(scheduleResultQueue);scheduleRequestQueue=nullptr;scheduleResultQueue=nullptr;return false;}if(xTaskCreate(scheduleWorker,"schedule_store",12288,nullptr,1,nullptr)!=pdPASS){vQueueDelete(scheduleRequestQueue);vQueueDelete(scheduleResultQueue);scheduleRequestQueue=nullptr;scheduleResultQueue=nullptr;return false;}return true;}
 bool enqueueScheduleWork(ScheduleOrigin origin,String &&input,uint32_t &id){if(scheduleStorageFault.load()||!scheduleWorkReady||scheduleWorkBusy)return false;auto *work=new(std::nothrow)ScheduleWork;if(!work)return false;work->id=++scheduleWorkId;work->schedule_generation=scheduleGeneration;work->backend_generation=backendPollState.validity_generation;work->origin=origin;work->input=std::move(input);if(xQueueSend(scheduleRequestQueue,&work,0)!=pdTRUE){wipeScheduleWork(work);return false;}scheduleWorkBusy=true;id=work->id;return true;}
@@ -553,9 +583,12 @@ void serviceWifi(uint32_t now){
   if(wififailover::shouldStartCycle(false,false,now,wifiState.phase_started_ms,wifiState.retry_delay_ms))startWifiScan(now);
 }
 String devicePage(String content) {
-  int styleEnd=content.indexOf("</style>");
-  if(styleEnd>=0)content=content.substring(styleEnd+8);
-  else {int meta;while((meta=content.indexOf("<meta"))>=0){int end=content.indexOf('>',meta);if(end<0)break;content.remove(meta,end-meta+1);}}
+  // Individual pages may add local CSS after their visible controls. Remove
+  // only the style element; keeping content before it is essential because the
+  // shared shell injects the remaining markup into the card.
+  int styleStart=content.indexOf("<style>");
+  if(styleStart>=0){int styleEnd=content.indexOf("</style>",styleStart);if(styleEnd>=0)content.remove(styleStart,styleEnd+8-styleStart);}
+  int meta;while((meta=content.indexOf("<meta"))>=0){int end=content.indexOf('>',meta);if(end<0)break;content.remove(meta,end-meta+1);}
   return String(R"PAGE(<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#152b42"><title>班表鬧鐘・裝置設定</title><style>
 :root{color-scheme:light;font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;color:#152b42;background:#f6f7f3}*{box-sizing:border-box}[hidden]{display:none!important}input[type=checkbox]{width:20px;height:20px;margin-right:8px}body{margin:0;padding:32px 20px 64px;font-size:16px;line-height:1.65}header,main,footer{width:100%;max-width:720px;margin:auto}header{display:flex;align-items:center;gap:14px;margin-bottom:28px}.brand-icon{display:grid;place-items:center;background:#152b42;color:#a8ead6;border-radius:16px;width:52px;height:52px;font-size:32px}.brand small{display:block;color:#668078;font-size:12px;letter-spacing:.08em}.brand strong{font-size:24px;letter-spacing:.02em}.badge{margin-left:auto;background:#e2f1e9;border:1px solid #cce3d6;color:#34614f;border-radius:30px;padding:6px 12px;font-size:12px}.card{background:#fff;border:1px solid #e0e5df;border-radius:24px;box-shadow:0 8px 32px #152b4207;padding:30px}h1{font-size:28px;line-height:1.3;margin:0 0 20px;letter-spacing:-.03em}h2{font-size:21px;border-top:1px solid #e6eae5;padding-top:28px;margin-top:32px}p{color:#63716c;margin:16px 0}form{margin:16px 0 20px}label{display:block;font-weight:600;margin-top:16px}input:not([type=hidden]):not([type=checkbox]),select{display:block;width:100%;min-height:50px;border:1px solid #ced8d1;border-radius:12px;background:#fafcf9;color:#152b42;font:inherit;padding:12px 14px;margin:8px 0 18px}input:focus,select:focus{outline:3px solid #a6dfce;outline-offset:2px}button,.primary-link{display:inline-block;border:0;border-radius:12px;background:#152b42;color:white;font:inherit;font-weight:600;padding:13px 20px;min-height:48px;cursor:pointer;text-align:center}button:hover{background:#28455e}button:active{transform:translateY(1px)}a{color:#276453;text-underline-offset:4px}a.primary-link{color:white;text-decoration:none;display:block}#status:not(:empty){background:#eaf5ee;border-radius:14px;padding:16px;overflow-wrap:anywhere}footer{text-align:center;color:#819087;font-size:12px;padding-top:24px}.help{font-size:13px}@media(max-width:480px){body{padding:22px 14px 40px}.card{padding:22px 20px;border-radius:20px}h1{font-size:25px}.badge{display:none}button{width:100%}}
 .calendar{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:5px;text-align:center}.calendar button{position:relative;min-height:44px;padding:5px;border-radius:9px;background:#edf1ee;color:#152b42;width:100%;font-size:16px}.calendar button.workday{background:#152b42;color:#a8ead6}.calendar button.silent-workday{background:#fff;color:#152b42;border:2px solid #152b42}.calendar button.reviewday{background:#ffe4b1;color:#714800}.calendar button.today{box-shadow:inset 0 0 0 2px #d43c32}.calendar button.today::after{content:"";position:absolute;top:5px;right:5px;width:6px;height:6px;border-radius:50%;background:#e23b32;box-shadow:0 0 0 1px #fff}.calendar button:disabled{opacity:.6}.time-row{display:grid;grid-template-columns:auto minmax(0,1fr) minmax(0,1fr) auto auto;gap:8px;align-items:center;margin:12px 0}.time-row label,.time-row select{margin:0!important}.time-row select{padding:10px 6px!important}.time-row button{padding:10px;min-height:48px;width:auto}.alarm-enable{display:flex!important;align-items:center;gap:5px;white-space:nowrap}.alarm-enable input{margin:0}.secondary{background:#e9efec;color:#274c42}.secondary:hover{background:#dce8e1}.upload-box{padding:16px;background:#f1f6f2;border:1px dashed #b9d0c4;border-radius:12px}.check-option{display:flex;align-items:center;gap:8px;padding:14px 0}.check-option input{flex:0 0 auto;margin:0}.time-row strong{font-size:14px}#ai-status{overflow-wrap:anywhere}button:disabled{cursor:wait;opacity:.6}#weekdays{margin-bottom:10px;color:#63716c}@media(max-width:600px){.time-row{grid-template-columns:1fr 1fr auto}.time-row strong{grid-column:1/-1}.alarm-enable{grid-column:1/3}}
@@ -584,7 +617,7 @@ void otaResetTerminalNoStaged(){otaReceived=0;otaTotal=0;otaLastProgressMs=0;}
 bool otaAuthorize(const void *request,void*){return request==&otaSession&&otaBusy.load();}
 bool readChargingNow(bool &active){if(!chargingInputValid)return false;const int level=gpio_get_level(GPIO_NUM_38);if(level!=0&&level!=1)return false;active=battery::charging_active(level);charging=active;return true;}
 esp_err_t otaReadGuard(alarm_ota_guard_t *out,void*){portENTER_CRITICAL(&otaMux);*out=otaGuard;portEXIT_CRITICAL(&otaMux);out->charging_valid=readChargingNow(out->charging);out->ringing=ringing;out->now_epoch=time(nullptr);return ESP_OK;}
-void refreshOtaGuard(){alarm_ota_guard_t g={};g.clock_valid=clockValid();g.ringing=ringing;g.snoozed=snooze>0;g.schedule_ready=!revision.isEmpty();g.now_epoch=time(nullptr);int64_t next=snooze>0?snooze:INT64_MAX;for(auto &a:alarms)if(alarmclock::upcoming(a.epoch,g.now_epoch,handled)&&a.epoch<next)next=a.epoch;g.next_alarm_epoch=next==INT64_MAX?0:next;portENTER_CRITICAL(&otaMux);otaGuard=g;portEXIT_CRITICAL(&otaMux);}
+void refreshOtaGuard(){alarm_ota_guard_t g={};g.clock_valid=clockValid();g.ringing=ringing;g.snoozed=snooze>0;g.schedule_ready=!revision.isEmpty();g.now_epoch=time(nullptr);int64_t next=snooze>0?snooze:nextAlarmEpoch(g.now_epoch);g.next_alarm_epoch=next==INT64_MAX?0:next;portENTER_CRITICAL(&otaMux);otaGuard=g;portEXIT_CRITICAL(&otaMux);}
 bool backendReachableNow(uint32_t nowMs){
   alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);
   return connectivity::backend_reachable(
@@ -728,7 +761,7 @@ void startBackendPoll(uint32_t nowMs){
   if(!request){backendpoll::allocationFailed(backendPollState,nowMs);syncState="後端服務無法使用";return;}
   request->ticket=ticket;request->fetch_schedule=!localSchedule;
   JsonDocument d;d["revision"]=revision;d["status"]=ringing?"ringing":(clockValid()?"ready":"waiting_for_time");d["ip"]=WiFi.localIP().toString();
-  int64_t next=INT64_MAX;for(auto &a:alarms)if(alarmclock::upcoming(a.epoch,time(nullptr),handled)&&a.epoch<next)next=a.epoch;if(next!=INT64_MAX)d["next_alarm"]=next;
+  int64_t next=nextAlarmEpoch(time(nullptr));if(next!=INT64_MAX)d["next_alarm"]=next;
   int percent=0;uint32_t age=0;JsonObject battery=d["battery"].to<JsonObject>();battery["schema"]=1;battery["valid"]=battery::value(batteryState,millis(),percent,age);if(battery["valid"].as<bool>()){battery["percent"]=percent;battery["sample_age_seconds"]=age;}else{battery["percent"]=nullptr;battery["sample_age_seconds"]=nullptr;}if(chargingInputValid)battery["charging"]=charging.load();else battery["charging"]=nullptr;
   const size_t heartbeatSize=measureJson(d);
   if(backend.length()>=sizeof(request->backend)||token.length()>=sizeof(request->token)||revision.length()>=sizeof(request->revision)||heartbeatSize>=sizeof(request->heartbeat)){
@@ -881,9 +914,9 @@ void routes() {
   });
   const char *headers[]={"Authorization","X-Setup-Nonce"}; server.collectHeaders(headers,2);tailnetRoutes();otaStagedRoutes();localCalendarRoutes();
   server.on("/api/clock",HTTP_GET,[]{JsonDocument d;d["ready"]=clockValid();d["last_sync"]=lastNetworkClock.load();d["interval_seconds"]=CLOCK_SYNC_INTERVAL_MS/1000;d["overdue"]=lastNetworkClock.load()?millis()-lastNetworkClockMs.load()>CLOCK_SYNC_INTERVAL_MS+300000:millis()-bootMs>120000;String out;serializeJson(d,out);server.send(200,"application/json",out);});
-  server.on("/api/status",HTTP_GET,[]{ JsonDocument d; d["version"]=VERSION;d["displaySettingsValid"]=displaySettingsValid;alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);d["tailnetLifecycle"]=tail.lifecycle==ALARM_TAILNET_QUEUED?"queued":tail.lifecycle==ALARM_TAILNET_STARTING?"starting":tail.lifecycle==ALARM_TAILNET_RUNNING?"running":tail.lifecycle==ALARM_TAILNET_RETRY_WAIT?"retry_wait":tail.lifecycle==ALARM_TAILNET_LIFECYCLE_BLOCKED?"blocked":"off";d["tailnetLifecycleLabel"]=tailnetLifecycleLabel(tail.lifecycle);d["tailnetRetryCount"]=tail.retry_count;backendendpoint::Endpoint backendInfo;const bool nativeBackend=backendendpoint::parse(backend.c_str(),backendInfo);d["backendTransport"]=nativeBackend?"tailscale":"unsupported";d["backendHost"]=nativeBackend?backendInfo.host:"";const uint32_t nowMs=millis();d["backendReachable"]=backendReachableNow(nowMs);if(backendHasSuccess.load())d["backendLastSuccessAgeSeconds"]=(nowMs-backendLastSuccessMs.load())/1000;else d["backendLastSuccessAgeSeconds"]=nullptr;int percent=0;uint32_t age=0;JsonObject battery=d["battery"].to<JsonObject>();battery["schema"]=1;battery["valid"]=battery::value(batteryState,millis(),percent,age);if(battery["valid"].as<bool>()){battery["percent"]=percent;battery["sample_age_seconds"]=age;}else{battery["percent"]=nullptr;battery["sample_age_seconds"]=nullptr;}if(chargingInputValid)battery["charging"]=charging.load();else battery["charging"]=nullptr;d["localSchedule"]=localSchedule;d["firstConsecutiveOnly"]=firstConsecutiveOnly;d["rotation"]=displayRotation*90;d["screenTimeoutMinutes"]=screenTimeoutMinutes;d["screenBrightness"]=screenBrightness;d["screenAwake"]=screenAwake; d["revision"]=revision;d["clockReady"]=clockValid();d["epoch"]=time(nullptr);d["ringing"]=ringing;d["wifi"]=WiFi.isConnected();d["alarmCount"]=alarms.size();d["sync"]=syncState;String out;serializeJson(d,out);server.send(200,"application/json",out); });
+  server.on("/api/status",HTTP_GET,[]{ JsonDocument d; d["version"]=VERSION;d["displaySettingsValid"]=displaySettingsValid;alarm_tailnet_status_t tail={};alarm_tailnet_get_status(&tail);d["tailnetLifecycle"]=tail.lifecycle==ALARM_TAILNET_QUEUED?"queued":tail.lifecycle==ALARM_TAILNET_STARTING?"starting":tail.lifecycle==ALARM_TAILNET_RUNNING?"running":tail.lifecycle==ALARM_TAILNET_RETRY_WAIT?"retry_wait":tail.lifecycle==ALARM_TAILNET_LIFECYCLE_BLOCKED?"blocked":"off";d["tailnetLifecycleLabel"]=tailnetLifecycleLabel(tail.lifecycle);d["tailnetRetryCount"]=tail.retry_count;backendendpoint::Endpoint backendInfo;const bool nativeBackend=backendendpoint::parse(backend.c_str(),backendInfo);d["backendTransport"]=nativeBackend?"tailscale":"unsupported";d["backendHost"]=nativeBackend?backendInfo.host:"";const uint32_t nowMs=millis();d["backendReachable"]=backendReachableNow(nowMs);if(backendHasSuccess.load())d["backendLastSuccessAgeSeconds"]=(nowMs-backendLastSuccessMs.load())/1000;else d["backendLastSuccessAgeSeconds"]=nullptr;int percent=0;uint32_t age=0;JsonObject battery=d["battery"].to<JsonObject>();battery["schema"]=1;battery["valid"]=battery::value(batteryState,millis(),percent,age);if(battery["valid"].as<bool>()){battery["percent"]=percent;battery["sample_age_seconds"]=age;}else{battery["percent"]=nullptr;battery["sample_age_seconds"]=nullptr;}if(chargingInputValid)battery["charging"]=charging.load();else battery["charging"]=nullptr;d["localSchedule"]=localSchedule;d["weeklyProfiles"]=weeklyConfigured();d["firstConsecutiveOnly"]=firstConsecutiveOnly;d["rotation"]=displayRotation*90;d["screenTimeoutMinutes"]=screenTimeoutMinutes;d["screenBrightness"]=screenBrightness;d["screenAwake"]=screenAwake; d["revision"]=revision;d["clockReady"]=clockValid();d["epoch"]=time(nullptr);d["ringing"]=ringing;d["wifi"]=WiFi.isConnected();d["alarmCount"]=alarms.size()+weeklyprofiles::enabledCount(weeklyProfiles.as<JsonVariantConst>());d["sync"]=syncState;String out;serializeJson(d,out);server.send(200,"application/json",out); });
   server.on("/display",HTTP_GET,[]{
-    String page=String("<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>裝置設定</title><style>body{font:20px system-ui;padding:24px}button,select{font:20px system-ui;padding:12px;margin:12px 0}</style><h1>裝置設定</h1><a class='primary-link' href='/calendar'>設定班表與鬧鐘</a><h2>螢幕</h2><form method='post' action='/display'><input type='hidden' name='nonce' value='")+setupNonce+"'><label for='rotation'>顯示方向</label><select id='rotation' name='rotation'>";
+    String page=String("<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>裝置設定</title><style>body{font:20px system-ui;padding:24px}button,select{font:20px system-ui;padding:12px;margin:12px 0}</style><h1>裝置設定</h1><a class='primary-link' href='/calendar'>設定 Kevin 與晴晴鬧鐘</a><h2>螢幕</h2><form method='post' action='/display'><input type='hidden' name='nonce' value='")+setupNonce+"'><label for='rotation'>顯示方向</label><select id='rotation' name='rotation'>";
     for(int r=0;r<4;r++)page+=String("<option value='")+r+"'"+(displayRotation==r?" selected":"")+">"+r*90+"°"+(r==0?"（正常）":r==2?"（上下顛倒）":"")+"</option>";
     page+="</select><label for='screen-timeout'>閒置多久後關閉螢幕</label><select id='screen-timeout' name='screen_timeout'>";
     const uint16_t timeouts[]={0,1,5,15,30,60};
@@ -943,8 +976,8 @@ void routes() {
     if(!portal){
       alarm_tailnet_status_t t={};alarm_tailnet_get_status(&t);
       String page=String("<h1>裝置管理</h1><p>本地設定網址：<a href='/'>http://")+WiFi.localIP().toString()+"/</a></p><p>"+tailnetLabel(t.state)+"</p>";
-      page+="<a class='primary-link' href='/calendar'>開啟班表與鬧鐘</a>";
-      page+="<p>在同一個班表頁上傳圖片或手動選擇日期。</p><a href='/tailnet'>Tailscale 連線與授權</a>";
+      page+="<a class='primary-link' href='/calendar'>開啟 Kevin 與晴晴鬧鐘</a>";
+      page+="<p>在同一頁設定兩人的一般工作日與週四鬧鐘。</p><a href='/tailnet'>Tailscale 連線與授權</a>";
       page+="<h2>裝置設定</h2><p>調整螢幕方向、更換無線網路，或檢查更新。</p><a href='/display'>開啟裝置設定</a><p class='help'>同時按住「＋」與「－」十秒，也能重新配網。</p>";
       server.send(200,"text/html; charset=utf-8",devicePage(page));return;
     }
@@ -982,9 +1015,10 @@ void setup() {
    * rotate only mismatched values so ordinary boots do not rewrite flash. */
   if(prefs.getString("token")!=PROVISION_TOKEN&&
      (prefs.putString("token",PROVISION_TOKEN)!=strlen(PROVISION_TOKEN)||prefs.getString("token")!=PROVISION_TOKEN))abort();
-  if(prefs.getString("backend").isEmpty()&&
+  if(prefs.getString("backend")!=PROVISION_BACKEND&&
      (prefs.putString("backend",PROVISION_BACKEND)!=strlen(PROVISION_BACKEND)||prefs.getString("backend")!=PROVISION_BACKEND))abort();
-  if(prefs.getString("manage").isEmpty()&&prefs.putString("manage",PROVISION_MANAGE)!=strlen(PROVISION_MANAGE))abort();
+  if(prefs.getString("manage")!=PROVISION_MANAGE&&
+     (prefs.putString("manage",PROVISION_MANAGE)!=strlen(PROVISION_MANAGE)||prefs.getString("manage")!=PROVISION_MANAGE))abort();
 #endif
   if(!loadWifiProfiles()){setupFailed=true;}
   backend=prefs.getString("backend");
@@ -1042,7 +1076,7 @@ void loop() {
   if(clockValid()) {
     const int64_t corrected=alarmclock::reconcileHandled(now,handled);
     if(corrected!=handled){handled=corrected;prefs.putLong64("handled",handled);}
-    int64_t latest=handled;
+    int64_t latest=handled;String weeklyLabel;int64_t weeklyDue=INT64_MAX;weeklyOccurrence(now,true,handled,weeklyDue,weeklyLabel);if(weeklyDue!=INT64_MAX){startRing(weeklyLabel);latest=std::max(latest,weeklyDue);}
     for(auto &alarm:alarms)if(alarmclock::due(alarm.epoch,now,handled)){startRing(alarm.label);latest=std::max(latest,alarm.epoch);}
     if(latest!=handled){handled=latest;prefs.putLong64("handled",handled);}
     if(snooze&&now>=snooze){bool fresh=now-snooze<=alarmclock::CATCHUP_SECONDS;snooze=0;prefs.putLong64("snooze",0);if(fresh)startRing("貪睡提醒");}

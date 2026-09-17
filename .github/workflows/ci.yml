@@ -63,6 +63,7 @@ jobs:
       - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/calendar_policy_test.cpp -o /tmp/calendar-test && /tmp/calendar-test
       - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/scheduler_test.cpp -o /tmp/scheduler-test && /tmp/scheduler-test
       - run: c++ -std=c++17 -Wall -Wextra -Werror -Ifirmware-next/components/arduino_libraries/ArduinoJson/src firmware-next/tests/calendar_metadata_test.cpp -o /tmp/calendar-meta-test && /tmp/calendar-meta-test
+      - run: c++ -std=c++17 -Wall -Wextra -Werror -Wno-deprecated-declarations -Ifirmware-next/components/arduino_libraries/ArduinoJson/src firmware-next/tests/weekly_profiles_test.cpp -o /tmp/weekly-profiles-test && /tmp/weekly-profiles-test
       - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/ota_download_policy_test.cpp -o /tmp/ota-download-test && /tmp/ota-download-test
       - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/screen_policy_test.cpp -o /tmp/screen-policy-test && /tmp/screen-policy-test
       - run: c++ -std=c++17 -Wall -Wextra -Werror -fsanitize=undefined firmware-next/tests/battery_policy_test.cpp -o /tmp/battery-policy-test && /tmp/battery-policy-test

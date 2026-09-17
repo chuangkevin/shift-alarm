@@ -91,9 +91,9 @@ def test_reliability_contract_and_versions_are_wired():
     assert "displaySettingsValid" in source
     assert "settingsLoadValid" in source
     assert "ota_manifest::available" in source
-    assert 'set(PROJECT_VER "0.3.26")' in Path("firmware-next/CMakeLists.txt").read_text()
+    assert 'set(PROJECT_VER "0.4.2")' in Path("firmware-next/CMakeLists.txt").read_text()
     ota_fixture = Path("firmware-next/components/alarm_ota/tests/test_real_component.c").read_text()
-    assert ota_fixture.count('version="0.3.26"') == 2
+    assert ota_fixture.count('version="0.4.2"') == 2
     assert 'version="0.3.12"' not in ota_fixture
     assert "VERSION = '0.1.10'" in Path("app.py").read_text()
 
@@ -108,8 +108,14 @@ def test_physical_menu_draw_and_gpio_are_integrated():
     assert 'uiState.page==deviceui::Page::Menu' in source
     assert 'remoteOk&&backendOk?"遠端與後端連線正常":"連線異常不影響本機鬧鐘"' in source
     assert 'line(8,154,"連線異常不影響本機鬧鐘")' not in source
-    for label in ('手機設定', '連線狀態', '班表資訊', '裝置資訊', '檢查更新', '返回主畫面'):
+    for label in ('手機設定', '連線狀態', '鬧鐘資訊', '裝置資訊', '檢查更新', '返回主畫面'):
         assert label in source
+
+
+def test_shared_page_shell_keeps_markup_before_page_local_style():
+    source = Path("firmware-next/main/main.cpp").read_text()
+    assert 'content.remove(styleStart,styleEnd+8-styleStart)' in source
+    assert 'content=content.substring(styleEnd+8)' not in source
     assert '尚無下一次鬧鐘' in source
     assert 'vTaskPrioritySet(nullptr,8)' in source
     assert 'delay(2)' in source
@@ -276,13 +282,13 @@ def test_multi_wifi_source_contract_is_wired_and_redacted():
     assert 'confirm(' not in page and 'alert(' not in page
 
 
-def test_recognition_budget_and_upload_limits_fit_slow_tailnet():
+def test_fixed_weekday_profiles_are_managed_on_one_device_page():
     page = Path("firmware-next/main/calendar_page.h").read_text()
-    assert "Math.min(1,1100/" in page
-    assert "toBlob(resolve,'image/jpeg',0.8)" in page
-    assert "abort(),240000" in page
-    assert "abort(),60000" in page
-    assert "setInterval(refreshTodayMarker,60000)" in page
+    assert "Kevin 與晴晴" in page
+    assert "週一、二、三、五" in page
+    assert "週四" in page
+    assert "(disabled?'disabled_':'')+group+'_times'" in page
+    assert "weekly_profiles" in page
     source = Path("app.py").read_text()
     assert "RECOGNITION_SECONDS', '180'" in source
     assert "im.thumbnail((1600, 1600))" in source

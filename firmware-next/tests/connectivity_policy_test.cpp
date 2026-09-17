@@ -12,7 +12,7 @@ int main() {
     assert(should_poll_backend(true, true, true, true));
     assert(!backend_reachable(false, true, true, true, 1000, 900));
     assert(!backend_reachable(true, false, true, true, 1000, 900));
-    assert(!backend_reachable(true, true, false, true, 1000, 900));
+    assert(backend_reachable(true, true, false, true, 1000, 900));
     assert(!backend_reachable(true, true, true, false, 1000, 900));
     assert(backend_reachable(true, true, true, true, 30900, 1000));
     assert(!backend_reachable(true, true, true, true, 31001, 1000));

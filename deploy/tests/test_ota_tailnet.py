@@ -75,6 +75,7 @@ class Tests(unittest.TestCase):
 
     def test_urls(self):
         self.assertEqual(ota.tailnet_url('http://100.90.212.116'), 'http://100.90.212.116')
+        self.assertEqual(ota.tailnet_url('http://100.127.82.47:8239'), 'http://100.127.82.47:8239')
         for url in ['http://192.168.18.160', 'http://localhost', 'https://100.90.212.116',
                     'http://100.90.212.116/foo', 'http://user@100.90.212.116',
                     'http://100.90.212.116?x=1', 'http://100.90.212.116:8081']:

@@ -18,6 +18,14 @@
 - `https://alarm.sisihome.org` 由 GN100 Caddy 限 Tailnet 存取，代理 ESP32 `100.104.66.47:80`；根路徑轉 `/calendar`。網域與區網入口必須顯示同一份 ESP32 介面與設定。
 - 沒有 Tailscale／後端時，手動月曆、鬧鐘、時鐘、顯示設定與離線響鈴仍可用。
 
+## Kevin 與晴晴的獨立裝置（本分支）
+
+`feat/kevin-dual-alarm` 專供第二顆 MAC `fc:01:2c:ca:15:88`：Kevin 與晴晴都固定週一到週五上班，兩人各有「週一、二、三、五」與「週四」兩組時間，每個時間獨立開關。裝置為 0.4.2、Tailnet `100.90.212.116`；遠端入口 `https://morning.sisihome.org`，裝置後端固定為 GN100 `100.127.82.47:8239`，代理到 rpi-matrix 獨立容器 `100.126.226.79:8239`。此分支的裝置權杖、資料庫與 OTA release 目錄都不可與原輪班裝置共用。
+
+2026-09-17 實機驗證：0.4.2 用 USB 寫入非執行中的 app0，再以 sequence 19 切換，未改 NVS、bootloader 或 partition table；啟動後 Wi-Fi、時鐘、Tailscale、亮度 25%、方向 90°、關屏 5 分鐘均正常。兩人的每週規則已保存，`weeklyProfiles=true`、4 個啟用時段，專用後端回連與 `morning.sisihome.org` 均正常。0.4.2 映像已發布到 `shift-alarm-morning/data/releases`，供後續真實 OTA 驗證。
+
+私有 `provisioning.h` 對這顆專用裝置是權威來源；0.4.1 起，權杖、後端與管理網址不相符時都會覆寫 NVS 並讀回驗證。這是修正換板後仍保留舊 `:8238`／舊網域的根因。不可將此行為或 0.4.x 韌體直接合併給原輪班裝置。
+
 ## 2026-09-16 已驗證基準
 
 | 項目 | 現況 |
