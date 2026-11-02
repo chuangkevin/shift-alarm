@@ -39,7 +39,7 @@ Wi-Fi 設定以 `wifi-v2-a`／`wifi-v2-b` 兩個 generation+CRC slot 與 checksu
 
 ## 私有後端
 
-Python 3.12 / FastAPI 部署在 `rpi-matrix:/home/kevin/DockerCompose/shift-alarm`，實際服務為 `100.126.226.79:8237`。ESP32 固定連 GN100 的 Tailnet-only HTTP 入口 `100.127.82.47:8237`，由 Caddy 代理至 rpi-matrix；它只提供 AI 辨識、心跳與私有韌體。`https://alarm.sisihome.org` 也由 GN100 Caddy 限 Tailnet 存取，直接代理目前在線 ESP32 `100.104.66.47:80`，根路徑轉到 `/calendar`。因此網域和裝置區網 IP 使用同一份 ESP32 介面與資料。
+Python 3.12 / FastAPI 自 2026-11-02 起部署在 nas-918 `/volume1/docker/shift-alarm`（容器 `shift-alarm`，`100.96.225.31:8237`；固定上班日裝置用 `shift-alarm-morning`，`:8239`），之前在 rpi-matrix。ESP32 固定連 GN100 的 Tailnet-only HTTP 入口 `100.127.82.47:8237`，由 Caddy 代理至後端；它只提供 AI 辨識、心跳與私有韌體。`https://alarm.sisihome.org` 也由 GN100 Caddy 限 Tailnet 存取，直接代理目前在線 ESP32 `100.104.66.47:80`，根路徑轉到 `/calendar`。因此網域和裝置區網 IP 使用同一份 ESP32 介面與資料。
 
 圖片辨識目前使用 GN100 New API 的 OpenAI-compatible 介面，優先使用已實測支援班表圖片的 `go/deepseek-v4-flash-vision-exp`，再以 `gemini-3.8-flash` 與 `gemini-flash` 備援；遇到 429 或暫時性 5xx 時會在 180 秒整體期限內輪替模型並有限重試。`max_tokens` 預設 6000 且強制不低於 400。這個 OpenAI-compatible 入口沒有提供原生 Gemini `thinkingBudget` 欄位，因此保留模型思考並以足夠輸出額度避免空字串。韌體的健康檢查／整體等待為 60／240 秒。逾時不套用班表；辨識金鑰只存在後端。
 

@@ -9,12 +9,12 @@
                                   │
                                   └──原生 Tailscale──> GN100 100.127.82.47:8237
                                                                │
-                                                               └──rpi-matrix 100.126.226.79:8237
+                                                               └──nas-918 100.96.225.31:8237（2026-11-02 前是 rpi-matrix）
                                                                  └──New API / Gemini
 ```
 
 - 手機不必加入 Tailnet；同區網即可使用 ESP32 自己架設的 `/calendar`、`/display`、`/clock`、`/tailnet` 與 `/update`。
-- ESP32 自己加入 Tailnet。AI 辨識、心跳與 OTA 固定連 GN100 `100.127.82.47:8237`，再由 Caddy 代理到 rpi-matrix。不要把 rpi-matrix IP 或區網 IP 重新 provision 回裝置。
+- ESP32 自己加入 Tailnet。AI 辨識、心跳與 OTA 固定連 GN100 `100.127.82.47:8237`，再由 Caddy 代理到 nas-918 後端。不要把後端主機 IP 或區網 IP 重新 provision 回裝置；換後端主機只改 GN100 Caddy。
 - `https://alarm.sisihome.org` 由 GN100 Caddy 限 Tailnet 存取，代理 ESP32 `100.104.66.47:80`；根路徑轉 `/calendar`。網域與區網入口必須顯示同一份 ESP32 介面與設定。
 - 沒有 Tailscale／後端時，手動月曆、鬧鐘、時鐘、顯示設定與離線響鈴仍可用。
 
@@ -24,8 +24,8 @@
 |---|---|
 | 韌體原始碼 | 0.3.23，`firmware-next/` |
 | 在線裝置 | `shiftalarm-9ca8`，MAC `fc:01:2c:c9:9c:a8`，Tailnet `100.104.66.47` |
-| 後端 | rpi-matrix `100.126.226.79:8237`，版本 0.1.7 |
-| 裝置後端入口 | GN100 `100.127.82.47:8237`，只綁 Tailnet，Caddy 代理到 rpi-matrix |
+| 後端 | 2026-11-02 起 nas-918 `100.96.225.31:8237`（容器 `shift-alarm`，0.1.10）；固定上班日裝置是 `:8239`（容器 `shift-alarm-morning`）。部署目錄 nas-918 `/volume1/docker/shift-alarm/`，見 `docs/更新部署.md` |
+| 裝置後端入口 | GN100 `100.127.82.47:8237`，只綁 Tailnet，Caddy 代理到 nas-918 |
 | 網域入口 | GN100 Caddy → ESP32 `100.104.66.47:80` |
 | AI | GN100 New API OpenAI-compatible；優先 `go/deepseek-v4-flash-vision-exp`，兩個 Gemini 路由備援；`max_tokens` 預設 6000、下限 400 |
 
